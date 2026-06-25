@@ -483,9 +483,14 @@ def build_sc2_database(device_name="Steam Controller 2026"):
         ]),
     ])
 
-    # Valve Custom HID Service — REMOVED
-    # SC2 Custom reports are now in the HID Service (above).
-    # This prevents hog-ll from ignoring them.
+    # Valve Custom HID Service — needed for Steam to identify this as an SC2 device.
+    # SC2 Custom CHR_REPORT inputs are in the HID Service above (for hog-ll subscription).
+    # This service has the Valve UUIDs so Steam's service discovery finds it.
+    db.add_service(SC2_HID_SERVICE_UUID, [
+        (SC2_INPUT_CH1_UUID, ATT_PROP_READ, b'\x00' * 45),  # Read-only stub
+        (SC2_INPUT_CH2_UUID, ATT_PROP_READ, b'\x00' * 47),  # Read-only stub
+        (SC2_REPORT_CH_UUID, ATT_PROP_READ | ATT_PROP_WRITE | ATT_PROP_WRITE_NO_RSP, b'\x00' * 64),
+    ])
 
     # Battery Service (0x180F)
     db.add_service(SVC_BATTERY, [

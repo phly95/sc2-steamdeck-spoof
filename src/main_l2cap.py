@@ -95,9 +95,10 @@ class HoGPeripheral:
 
         # Create advertisement object
         adv_path = "/com/steamdeck/sc2/adv0"
+        from gatt_db import SC2_HID_SERVICE_UUID
         self.adv = LEAdvertisement(
             self.bus, adv_path, local_name,
-            service_uuids=["1812"],  # HID Service only — SC2 Custom reports are now inside it
+            service_uuids=["1812", SC2_HID_SERVICE_UUID],  # HID + Valve Custom (for SC2 identification)
             appearance=0x03C4,
         )
 
