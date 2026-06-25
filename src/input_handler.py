@@ -195,9 +195,9 @@ class InputHandler:
         report.buttons = b
 
         lx = struct.unpack_from('<h', raw, 48)[0]
-        ly = -struct.unpack_from('<h', raw, 50)[0]  # Neptune Y axis is inverted
+        ly = struct.unpack_from('<h', raw, 50)[0]  # No negate: SC2 stores Y as-is, SDL negates
         rx = struct.unpack_from('<h', raw, 52)[0]
-        ry = -struct.unpack_from('<h', raw, 54)[0]  # Neptune Y axis is inverted
+        ry = struct.unpack_from('<h', raw, 54)[0]  # No negate: SC2 stores Y as-is, SDL negates
 
         report.lx = lx
         report.ly = ly
