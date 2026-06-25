@@ -93,6 +93,11 @@ class HoGPeripheral:
         print(f"[+] SC2 Custom Report characteristic handle: 0x{self._sc2_report_handle:04x}" if self._sc2_report_handle
               else "[-] WARNING: SC2 Custom Report characteristic not found")
 
+        # Find CHR_REPORT handles in HID Service for hog-ll subscription
+        self._sc2_hid_handle = self._find_report_char_handle(0x45, 0x01)
+        print(f"[+] SC2 CHR_REPORT (HID Service) handle: 0x{self._sc2_hid_handle:04x}" if self._sc2_hid_handle
+              else "[-] WARNING: SC2 CHR_REPORT not found in HID Service")
+
         # Create advertisement object
         adv_path = "/com/steamdeck/sc2/adv0"
         from gatt_db import SC2_HID_SERVICE_UUID
@@ -521,8 +526,12 @@ class HoGPeripheral:
             gamepad_45b = report_dict.get('gamepad_45b')
             if gamepad_12b and self._report_handle:
                 self.att_server.send_notification(self._report_handle, gamepad_12b)
-            if gamepad_45b and self._sc2_report_handle:
-                self.att_server.send_notification(self._sc2_report_handle, gamepad_45b)
+            if gamepad_45b:
+                # Send on both Valve Custom (for Steam's direct read) and CHR_REPORT (for hog-ll)
+                if self._sc2_report_handle:
+                    self.att_server.send_notification(self._sc2_report_handle, gamepad_45b)
+                if self._sc2_hid_handle:
+                    self.att_server.send_notification(self._sc2_hid_handle, gamepad_45b)
         else:
             # Lizard mode: send mouse and keyboard reports when they change
             mouse_4b = report_dict.get('mouse_4b')
