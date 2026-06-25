@@ -206,11 +206,11 @@ class InputHandler:
 
         lt = struct.unpack_from('<H', raw, 44)[0]
         rt = struct.unpack_from('<H', raw, 46)[0]
-        left_trigger = min(255, lt >> 7)
-        right_trigger = min(255, rt >> 7)
-        
-        report.left_trigger = left_trigger
-        report.right_trigger = right_trigger
+        # SC2 expects triggers as signed 16-bit (0-32767 range, same as Neptune)
+        left_trigger_16 = min(32767, lt)
+        right_trigger_16 = min(32767, rt)
+        report.left_trigger = min(255, lt >> 7)
+        report.right_trigger = min(255, rt >> 7)
 
         # --- 45-byte SC2 BLE Custom Report (Report 0x45) ---
         # Triton 32-bit button bitmask — from SDL3 src/joystick/hidapi/SDL_hidapi_steam_triton.c
@@ -257,36 +257,50 @@ class InputHandler:
         gyro_y = struct.unpack_from('<h', raw, 32)[0]
         gyro_z = struct.unpack_from('<h', raw, 34)[0]
 
-        # SC2 45-byte report layout (byte positions after Report ID stripped):
-        # Based on user feedback mapping Deck inputs → Steam controller test display:
-        #   Deck LX right → Steam LX up:       Steam_lx = Deck_lx... no
-        #   Deck LX right → Steam LX up:       report45[9..10] = lx  → Steam reads as ly
-        #   Deck LY up → Steam RX left:         report45[7..8] = -ry  → Steam reads as lx (negated = left)
-        #   Deck RY up → Steam LX left:         report45[11..12] = -ly → Steam reads as rx (negated = left)
-        #   Deck RX left/right → Steam RT:      report45[6] = rx      → Steam reads as rt
-        #
-        # Actually this is too complex to derive from feedback alone. Let me try
-        # the documented layout first since the btmon analysis confirmed it matches.
+        # SC2 45-byte report layout from SDL3 TritonMTUNoQuat_t struct:
+        # [0]      seq_num (1 byte)
+        # [1-4]    buttons (32-bit)
+        # [5-6]    sTriggerLeft (signed 16-bit, 0-32767)
+        # [7-8]    sTriggerRight (signed 16-bit, 0-32767)
+        # [9-10]   sLeftStickX (signed 16-bit)
+        # [11-12]  sLeftStickY (signed 16-bit)
+        # [13-14]  sRightStickX (signed 16-bit)
+        # [15-16]  sRightStickY (signed 16-bit)
+        # [17-18]  sLeftPadX (signed 16-bit)
+        # [19-20]  sLeftPadY (signed 16-bit)
+        # [21-22]  unPressureLeft (unsigned 16-bit)
+        # [23-24]  sRightPadX (signed 16-bit)
+        # [25-26]  sRightPadY (signed 16-bit)
+        # [27-28]  unPressureRight (unsigned 16-bit)
+        # [29-32]  timestamp (uint32_t)
+        # [33-34]  accel_x (signed 16-bit)
+        # [35-36]  accel_y (signed 16-bit)
+        # [37-38]  accel_z (signed 16-bit)
+        # [39-40]  gyro_x (signed 16-bit)
+        # [41-42]  gyro_y (signed 16-bit)
+        # [43-44]  gyro_z (signed 16-bit)
         report45 = bytearray(45)
         report45[0] = self.seq_num
         struct.pack_into("<I", report45, 1, b32)
-        report45[5] = left_trigger
-        report45[6] = right_trigger
-        struct.pack_into("<h", report45, 7, lx)
-        struct.pack_into("<h", report45, 9, ly)
-        struct.pack_into("<h", report45, 11, rx)
-        struct.pack_into("<h", report45, 13, ry)
-        struct.pack_into("<h", report45, 15, lpad_x)
-        struct.pack_into("<h", report45, 17, lpad_y)
-        struct.pack_into("<h", report45, 19, rpad_x)
-        struct.pack_into("<h", report45, 21, rpad_y)
-        struct.pack_into("<h", report45, 23, accel_x)
-        struct.pack_into("<h", report45, 25, accel_y)
-        struct.pack_into("<h", report45, 27, accel_z)
-        struct.pack_into("<h", report45, 29, gyro_x)
-        struct.pack_into("<h", report45, 31, gyro_y)
-        struct.pack_into("<h", report45, 33, gyro_z)
-        struct.pack_into("<I", report45, 35, timestamp_us)
+        struct.pack_into("<h", report45, 5, left_trigger_16)
+        struct.pack_into("<h", report45, 7, right_trigger_16)
+        struct.pack_into("<h", report45, 9, lx)
+        struct.pack_into("<h", report45, 11, ly)
+        struct.pack_into("<h", report45, 13, rx)
+        struct.pack_into("<h", report45, 15, ry)
+        struct.pack_into("<h", report45, 17, lpad_x)
+        struct.pack_into("<h", report45, 19, lpad_y)
+        struct.pack_into("<H", report45, 21, 0)  # unPressureLeft (no force sensor on Neptune)
+        struct.pack_into("<h", report45, 23, rpad_x)
+        struct.pack_into("<h", report45, 25, rpad_y)
+        struct.pack_into("<H", report45, 27, 0)  # unPressureRight (no force sensor on Neptune)
+        struct.pack_into("<I", report45, 29, timestamp_us)
+        struct.pack_into("<h", report45, 33, accel_x)
+        struct.pack_into("<h", report45, 35, accel_y)
+        struct.pack_into("<h", report45, 37, accel_z)
+        struct.pack_into("<h", report45, 39, gyro_x)
+        struct.pack_into("<h", report45, 41, gyro_y)
+        struct.pack_into("<h", report45, 43, gyro_z)
 
         # --- Lizard Mode Mouse Emulation ---
         rpad_touch = bool(btn10 & 0x10)
