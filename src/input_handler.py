@@ -243,27 +243,29 @@ class InputHandler:
         gyro_y = struct.unpack_from('<h', raw, 32)[0]
         gyro_z = struct.unpack_from('<h', raw, 34)[0]
 
+        # NOTE: Report ID (0x45) is NOT included in the data — hog-ll's bt_uhid_input()
+        # adds it automatically from the Report Reference descriptor. Including it causes
+        # a double Report ID that corrupts the kernel's HID parser.
         report45 = bytearray(45)
-        report45[0] = 0x45
-        report45[1] = self.seq_num
-        struct.pack_into("<I", report45, 2, b32)
-        report45[6] = left_trigger
-        report45[7] = right_trigger
-        struct.pack_into("<h", report45, 8, lx)
-        struct.pack_into("<h", report45, 10, ly)
-        struct.pack_into("<h", report45, 12, rx)
-        struct.pack_into("<h", report45, 14, ry)
-        struct.pack_into("<h", report45, 16, lpad_x)
-        struct.pack_into("<h", report45, 18, lpad_y)
-        struct.pack_into("<h", report45, 20, rpad_x)
-        struct.pack_into("<h", report45, 22, rpad_y)
-        struct.pack_into("<h", report45, 24, accel_x)
-        struct.pack_into("<h", report45, 26, accel_y)
-        struct.pack_into("<h", report45, 28, accel_z)
-        struct.pack_into("<h", report45, 30, gyro_x)
-        struct.pack_into("<h", report45, 32, gyro_y)
-        struct.pack_into("<h", report45, 34, gyro_z)
-        struct.pack_into("<I", report45, 36, timestamp_us)
+        report45[0] = self.seq_num
+        struct.pack_into("<I", report45, 1, b32)
+        report45[5] = left_trigger
+        report45[6] = right_trigger
+        struct.pack_into("<h", report45, 7, lx)
+        struct.pack_into("<h", report45, 9, ly)
+        struct.pack_into("<h", report45, 11, rx)
+        struct.pack_into("<h", report45, 13, ry)
+        struct.pack_into("<h", report45, 15, lpad_x)
+        struct.pack_into("<h", report45, 17, lpad_y)
+        struct.pack_into("<h", report45, 19, rpad_x)
+        struct.pack_into("<h", report45, 21, rpad_y)
+        struct.pack_into("<h", report45, 23, accel_x)
+        struct.pack_into("<h", report45, 25, accel_y)
+        struct.pack_into("<h", report45, 27, accel_z)
+        struct.pack_into("<h", report45, 29, gyro_x)
+        struct.pack_into("<h", report45, 31, gyro_y)
+        struct.pack_into("<h", report45, 33, gyro_z)
+        struct.pack_into("<I", report45, 35, timestamp_us)
 
         # --- Lizard Mode Mouse Emulation ---
         rpad_touch = bool(btn10 & 0x10)

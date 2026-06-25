@@ -532,14 +532,8 @@ class HoGPeripheral:
                     self.att_server.send_notification(self._sc2_report_handle, gamepad_45b)
                 if self._sc2_hid_handle:
                     self.att_server.send_notification(self._sc2_hid_handle, gamepad_45b)
-        else:
-            # Lizard mode: send mouse and keyboard reports when they change
-            mouse_4b = report_dict.get('mouse_4b')
-            kbd_8b = report_dict.get('kbd_8b')
-            if mouse_4b and self._mouse_report_handle:
-                self.att_server.send_notification(self._mouse_report_handle, mouse_4b)
-            if kbd_8b and self._keyboard_report_handle:
-                self.att_server.send_notification(self._keyboard_report_handle, kbd_8b)
+        # Lizard mode suppressed — real SC2 doesn't send mouse/keyboard over BLE.
+        # Steam's SC2 driver handles everything via Feature Reports + CHR_REPORT.
 
     def run(self):
         """Run the main event loop."""
