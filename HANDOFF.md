@@ -46,35 +46,36 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 ---
 
 ## 2. What is Working
-- **Raw L2CAP ATT Server (CID 4)**: Bypasses the SteamOS BlueZ GATT listener socket binding bug (which binds only to the public address instead of the static random address). Works reliably with MTU negotiation (up to 517).
-- **Just Works Pairing**: Handled automatically on the Deck using a custom D-Bus `Agent1` implementation (`src/agent.py`) which auto-confirms passkey and authorization requests.
-- **Full GATT Database (74 attributes, 6 services)**: Exposes standard GAP, GATT, HID (0x1812), Battery, Device Information (0x180A), and the Valve Custom HID Service (`100f6c32-...`).
-- **PnP ID Validation**: Uses USB-IF (0x02) as the Vendor ID Source with Valve's VID (0x28DE) and PID (0x1303), resolving host-side protocol errors when reading PNP_ID.
-- **CCCD Cache Persistence**: Keeps track of client configuration descriptors across disconnects. When the host reconnects, notifications resume immediately.
-- **Physical Deck Input Capture**: Input handler reads directly from the Neptune controller `/dev/hidraw3` interface. Lizard mode on the Deck is periodically disabled by sending output reports (`0x81` ClearDigitalMappings) via `os.write()`.
-- **Neptune Auto-Recovery**: If the hidraw device crashes (e.g., from a bad feature report proxy), the input handler waits 2s and reopens it, up to 10 retries.
-- **End-to-End Lizard Mode Emulation**: 
-  - Standard HID Mouse (handle `0x0019`) and Keyboard (handle `0x001d`) reports are packed and notified to the host.
-  - The host creates `/dev/input/eventN` for "Steam Controller 2026 Mouse" and "Steam Controller 2026 Keyboard".
-  - Pointer relative movement (right trackpad) and keypresses are successfully received by the host's `evdev` system.
-- **Synthetic SC2 Command Handler** (Feature Report 0x00):
-  - Intercepts SC2 commands from Steam instead of proxying to Neptune (which would crash it).
-  - Handles `0x83` (GET_ATTRIBUTES), `0xAE` (GET_SERIAL), `0x81` (CLEAR_MAPPINGS), `0x87` (SET_ATTRIBUTES), `0x85` (SET_MODE).
-  - Returns synthetic SC2 device info so Steam recognizes the controller and proceeds to mode switch.
-- **Comprehensive Diagnostic Logging** (`[DIAG]` tagged):
-  - Tracks all CCCD subscriptions with human-readable handle names.
-  - Logs dropped notifications (first drop + every 200th).
-  - Prints full DIAGNOSTIC SUMMARY on disconnect.
-  - Logs all Feature Report writes with full data.
+- **Raw L2CAP ATT Server (CID 4)**: Bypasses the SteamOS BlueZ GATT listener socket binding bug.
+- **Just Works Pairing**: Auto-confirm via D-Bus `Agent1`.
+- **GATT Database (82 attributes, 6 services)**: GAP, GATT, HID (0x1812) with CHR_REPORT for SC2 Custom, Valve Custom HID Service, Battery, Device Information.
+- **PnP ID**: USB-IF source (0x02), Valve VID (0x28DE), PID (0x1303).
+- **Physical Deck Input Capture**: Reads Neptune controller `/dev/hidraw3` (64-byte HID reports).
+- **Neptune Auto-Recovery**: Reopens hidraw on crash (2s delay, 10 retries).
+- **Standard HID Gamepad Reports**: 12-byte reports on handle `0x0012` with buttons, analog sticks (Y axis corrected), triggers. Host creates `/dev/input/eventN` — **KDE Game Controller and Steam detect this as a generic controller**.
+- **Lizard Mode Mouse/Keyboard**: Relative mouse (right trackpad) and keyboard reports on handles `0x0019`/`0x001d`.
+- **Synthetic SC2 Command Handler**: Feature Report 0x00 intercepts SC2 commands (0x83 GET_ATTRIBUTES, 0xAE GET_SERIAL, 0x87 SET_SETTINGS, etc.) with correct byte-level response format matching real device captures from InputPlumber.
+- **CHR_REPORT SC2 Custom in HID Service**: Report IDs 0x45 (45-byte) and 0x47 (47-byte) in HID Service for hog-ll subscription, PLUS Valve Custom Service for Steam identification. Dual notification targets.
+- **Comprehensive Diagnostic Logging** (`[DIAG]` tagged).
 
 ---
 
 ## 3. What Needs to be Done
 
-### 1. Steam Controller Recognition — Partially Working
-- **Status**: Steam now recognizes the device as a Steam Controller 2026 in Controller Settings.
-- **What works**: GET_ATTRIBUTES (0x83) and GET_SERIAL (0xAE) return correct synthetic responses. Steam proceeds past these commands.
-- **What's stuck**: After initial handshake, Steam sends SET_SETTINGS (0x87) in a 3-second loop. The response format was wrong (used old `[0x01, 0x87, 0x00]` format instead of proper `[cmd, length, ...]` header). Fixed to not store a GET_REPORT response for 0x87 (write-only command per InputPlumber).
+### 1. Steam Controller 2026 Recognition (Proprietary Input Format)
+- **Status**: Adding CHR_REPORT for SC2 Custom to the HID Service causes Steam to detect the device as a **generic controller** instead of a **Steam Controller 2026**. The vendor-defined HID Report Map entries change the kernel's uhid device type.
+- **Root cause**: The HID Report Map defines the device type. Vendor-defined collections (Usage Page 0xFF01) create generic HID devices. The Valve Custom HID Service alone is not enough for Steam to use SC2-specific input handling.
+- **What to try next**:
+  1. Investigate how InputPlumber's host-side driver discovers and reads from the Valve Custom HID Service — it may bypass hog-ll entirely and use raw GATT characteristics.
+  2. Consider running InputPlumber on the host instead of relying on hog-ll.
+  3. Research whether there's a way to tell hog-ll to forward Valve Custom Service data to Steam.
+
+### 2. Dual Trackpads & IMU (Gyro/Accel) Forwarding
+- Update the SC2 custom 45-byte report generation in `src/input_handler.py` to correctly extract trackpad X/Y and IMU values from Neptune's 64-byte reports.
+- Refer to `docs/sc2-protocol.md` for payload offsets.
+
+### 3. Auto-Reconnect Daemon
+- Restart advertising cleanly after disconnects.
 - **Next**: Test if the 0x87 fix allows Steam to proceed to 0x81 (ClearDigitalMappings) and 0x85 (mode switch). If not, may need to add GetChipId (0xBA) support or fix other response formats.
 - **Key commands in the SC2 protocol flow**:
   1. `0x83` GET_ATTRIBUTES → response: `[0x83, 0x2D, 9 attributes x 5 bytes, padding]`
@@ -84,13 +85,6 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
   5. `0x85` SET_DEFAULT_DIGITAL_MAPPINGS → write-only (enters gamepad mode)
   6. `0x87` SET_SETTINGS → write-only (configures registers)
   7. `0x85` via Feature Report 0x85 → mode switch (lizard ↔ Steam Input)
-
-### 2. Dual Trackpads & IMU (Gyro/Accel) Forwarding
-- Update the SC2 custom 45-byte report generation (`gamepad_45b`) in `src/input_handler.py` to correctly extract the trackpad coordinates and the IMU values from the Neptune 64-byte reports and package them.
-- Refer to `docs/sc2-protocol.md` for the payload offsets of trackpad X/Y and IMU gyro/accel coordinates.
-
-### 3. Auto-Reconnect Daemon & Service Reliability
-- Build a reconnection daemon or logic in `main_l2cap.py` to ensure that if the Bluetooth connection is lost, advertising is restarted cleanly, and the client can reconnect without manual steps.
 
 ---
 
