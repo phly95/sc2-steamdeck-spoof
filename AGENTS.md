@@ -90,10 +90,10 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 
 ### What Needs to Happen Next
 
-1. **Fix SET_SETTINGS Register 0x09 Retry Loop** — After the initial handshake completes, Steam retries SET_SETTINGS register 0x09 (value=0x0000, lizard mode disable) every 3 seconds. Tried 3 response formats (command echo, GET_SETTINGS_VALUES, register+value) — none broke the loop. RE confirmed: lizard mode must be OFF for haptics to work. Need a real SC2 btmon capture to see the correct verification response.
-2. **Investigate `set_report_cb()` ATT Error** — `hog-lib.c:set_report_cb() Error setting Report value` appears at connection time. btmon confirmed hog-ll discovers the output report handle (0x0019) but never writes to it. This error may put hog-ll in a state where it can't send output reports. This is the most likely root cause of haptics not working.
-3. **BLE vs USB Code Path** — RE confirmed haptics use `SDL_hid_write()` (output reports, NOT feature reports). The BLE path goes through hog-ll which translates to ATT Write Command (0x52). Need to check if there's a BLE-specific gate that prevents output report writes.
-4. **Command 0xf2 Response Format** — RE found it's a per-category capability query dispatched via switch/case. Tried returning capabilities bitmask (0x4169bfff) — didn't break the loop. Need real SC2 capture to see correct response format.
+1. **Fix SET_SETTINGS Register 0x09 Verification Loop** — Steam sends SET_SETTINGS 0x09 (lizard mode OFF) every 3 seconds and NEVER reads FR 0x00 back to verify. Zero ATT Read Requests observed. Root cause likely the `set_report_cb()` error putting BlueZ's HOG profile in a broken state. **Known bug in response format**: `payload_len + 1` (line 464, main_l2cap.py) should be `payload_len` — length byte is 0x04 instead of 0x03.
+2. **Fix `set_report_cb()` ATT Error** — BlueZ's HOG profile sends ATT Write Request (0x12) to set a HID Report value. Our ATT server returns ATT Error 0x0E (Unlikely Error). This may prevent the HOG profile from sending feature report reads, which explains why the SET_SETTINGS verification never happens. **This is the most likely root cause of the entire SET_SETTINGS loop.**
+3. **BLE vs USB Code Path** — RE confirmed no BLE-specific gate on output reports. All transports share the same vtable (0x02ae1c10). The BLE flag at handler+0x08 is metadata only.
+4. **Command 0xf2 Response Format** — RE found it's a per-category capability query dispatched via switch/case. Tried returning capabilities bitmask (0x4169bfff) — didn't break the loop. Need real SC2 capture.
 5. **ControllerDetails_tE Registration** — RE found the struct is 84 bytes, ready_flag at offset 0x3c must be 1, set by QueueFetchingControllerDetails at 0x01092820. Fields come from controller object offsets 0x84-0xd4. Product ID 0x1303 is in the recognized range (0x1302-0x1305).
 
 ### Files You Must Read Before Making Changes

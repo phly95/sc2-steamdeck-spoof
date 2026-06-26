@@ -74,19 +74,16 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 
 ## 3. What Needs to be Done
 
-### 1. Fix SET_SETTINGS Register 0x09 Retry Loop (PRIMARY BLOCKER)
-- **Status**: After the initial handshake completes, Steam retries SET_SETTINGS register 0x09 (value=0x0000) every 3 seconds. `BYieldingCompleteSteamControllerRegistration` blocks at `EYldWaitForControllerDetails`. Steam does NOT read FR 0x00 back after this write — the retry is write-only. Sending CHR_REPORT notifications didn't break the loop.
-- **RE findings**: The SET_SETTINGS buffer format is `[0x01, 0x87, 0x03, register, value_lo, value_hi, ...]`. Register 0x09 = SETTING_LIZARD_MODE, value 0 = LIZARD_MODE_OFF. Lizard mode must be OFF for haptics to work. The verification reads FR 0x00 back to check the setting took effect.
-- **IMPORTANT UPDATE**: Another agent cleared stale bonding keys on the host (`bluetoothctl remove C2:12:34:56:78:9A`) and re-paired. After this, the handshake completed successfully and 45-byte SC2 Custom reports were verified flowing to the host. **The bonding key mismatch (gotcha #9) was likely the root cause** — stale LTK caused connection instability that prevented the handshake from completing properly.
-- **Bugs fixed this session**:
-  1. **`SC2_CMD_SET_MODE` AttributeError** — `main_l2cap.py:456` referenced `self.SC2_CMD_SET_MODE` but the constant was `SC2_CMD_SET_CONTROLLER_MODE`. This crashed every 0xf2 command silently, causing Steam to see empty capability data. Fixed to use `SC2_CMD_SET_DEFAULT_MAPPINGS` (the correct constant for 0x85).
-  2. **Capabilities bitmask zeroed** — `ATTRIB_CAPABILITIES` (tag 2 in GET_ATTRIBUTES) was `0x00000000`. Changed to `0x4169bfff` (real SC2 value from controller logs).
-  3. **SET_SETTINGS early return** — `return` before `self._pending_fr_response[report_id]` was set meant Steam never got SET_SETTINGS acknowledgment via FR 0x00 read. Fixed by removing the early return and improving the response format to include register + value echo.
-- **Root cause hypothesis**: The 0xf2 command response is still `[0xf2, 0x00, zeros]`. RE found it's a per-category capability query dispatched via switch/case. Tried returning capabilities bitmask (0x4169bfff) — didn't break the loop. Need real SC2 capture to see correct response format.
+### 1. Fix SET_SETTINGS Register 0x09 Verification Loop (PRIMARY BLOCKER)
+- **Status**: Steam sends SET_SETTINGS 0x09 (lizard mode OFF) every 3 seconds. **Steam NEVER reads FR 0x00 back to verify** — zero ATT Read Requests observed in btmon and Deck logs. The verification path in `vtable[0x130]` (get_feature_report) is never triggered. Root cause likely the `set_report_cb()` error putting BlueZ's HOG profile in a broken state where it cannot send feature report reads.
+- **RE findings**: The SET_SETTINGS buffer format is `[0x01, 0x87, 0x03, register, value_lo, value_hi, ...]`. Register 0x09 = SETTING_LIZARD_MODE, value 0 = LIZARD_MODE_OFF. Lizard mode must be OFF for haptics to work. The verification reads FR 0x00 back and does a byte-by-byte comparison of the echoed command bytes.
+- **Known bug**: `payload_len + 1` (line 464, main_l2cap.py) should be `payload_len` — the SET_SETTINGS response length byte is 0x04 instead of 0x03.
+- **Critical log finding**: The write goes to handle 0x0024 (FR 0x00 value) with 65 bytes of data starting with `01 87 03 09 00 00...` (Report ID 0x01 at byte 0). The callback fires with report_id=0x00. No ATT Read Requests follow — the verification never reads FR 0x00.
 - **What to try next**:
-  1. Capture a real SC2 handshake via `btmon -t -w /tmp/sc2_handshake.log` on the host while pairing a real SC2 controller
-  2. Analyze the Feature Report read/write sequence, specifically the 0xf2 responses
-  3. Try different 0xf2 response payloads (e.g., register values for each category)
+  1. Fix the `set_report_cb()` error — BlueZ returns ATT Error 0x0E when our ATT server can't handle a SET_REPORT write. This may be putting the HOG profile in a state where it can't send feature report reads.
+  2. Fix the `payload_len + 1` → `payload_len` bug
+  3. Add diagnostic logging to `_handle_write` to see which handle BlueZ tries to SET_REPORT on
+  4. Check if the HOG profile's pending SET_REPORT blocks all subsequent reads
 
 ### 2. Investigate `set_report_cb()` ATT Error on Host (LIKELY ROOT CAUSE)
 - **Status**: `hog-lib.c:set_report_cb() Error setting Report value: Request attribute has encountered an unlikely error` appears at connection time. btmon capture confirmed hog-ll discovers the output report handle (0x0019) but **never writes to it**. This error may put hog-ll in a state where it can't send output reports — explaining why zero ATT Write Command (0x52) packets are sent.
@@ -112,18 +109,9 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 - **Remaining**: Ensure clean re-advertising after disconnects without manual intervention.
 
 ### 4. SET_SETTINGS Loop (Known Blocker)
-- **Status**: After the initial handshake, Steam falls into a SET_SETTINGS register 0x09 retry loop every 3 seconds. Never reaches SET_MODE.
-- **Bugs fixed this session**:
-  1. `SC2_CMD_SET_MODE` AttributeError — 0xf2 commands were crashing silently (was causing 8x retries, now 1x)
-  2. Capabilities bitmask zeroed → fixed to 0x4169bfff
-  3. SET_SETTINGS early return → FR 0x00 read never got the response
-- **Root cause**: The `BYieldingCompleteSteamControllerRegistration` flow blocks at `EYldWaitForControllerDetails`. The registration flow involves:
-  1. `CHIDIOThread::DiscoverNewControllers()` → enumerate
-  2. `CHIDIOThread::ConnectController()` → connect
-  3. `QueueFetchingControllerDetails()` → get ControllerDetails_tE
-  4. `YldInitialControllerStateEnumerated: waiting on details` ← **BLOCKED HERE**
-  5. `WaitInitialControllerStateEnumerated_Request/Response`
-  6. `CClientJobCompleteControllerRegistration` → proceeds
+- **Status**: Steam sends SET_SETTINGS 0x09 every 3 seconds. **Zero ATT Read Requests** — the verification never reads FR 0x00 back. The `BYieldingCompleteSteamControllerRegistration` flow blocks at `EYldWaitForControllerDetails`.
+- **Bug found**: `payload_len + 1` in SET_SETTINGS response should be `payload_len` (length byte 0x04 → 0x03).
+- **Root cause hypothesis**: The `set_report_cb()` ATT error (BlueZ returns 0x0E to a SET_REPORT Write Request) puts the HOG profile in a broken state where it cannot send feature report reads. This explains why the verification never reads FR 0x00.
 - **Key commands in the SC2 protocol flow**:
   1. `0x83` GET_ATTRIBUTES → response: `[0x83, 0x2D, 9 attributes x 5 bytes, padding]`
   2. `0xF2` Unknown (1-byte payload varies: 0x01, 0x02, etc.) → response: `[0xF2, 0x00, zeros]` (STILL WRONG — needs real SC2 capture)
