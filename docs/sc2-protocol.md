@@ -160,6 +160,54 @@ Key strings from Steam Client:
 | 0x86 | Host → Device | Configuration |
 | 0x87 | Host → Device | Calibration data |
 
+## SC2 Command Bytes (Feature Report 0x00)
+
+| Byte | Name | Direction | Description |
+|------|------|-----------|-------------|
+| 0x80 | ID_SET_DIGITAL_MAPPINGS | Host→Device | Set button mappings |
+| 0x81 | ID_CLEAR_DIGITAL_MAPPINGS | Host→Device | Clear mappings (exit lizard mode) |
+| 0x82 | ID_GET_DIGITAL_MAPPINGS | Host→Device | Get current mappings |
+| 0x83 | ID_GET_ATTRIBUTES_VALUES | Bidirectional | Get device attributes |
+| 0x84 | ID_GET_ATTRIBUTE_LABEL | Host→Device | Get attribute label |
+| 0x85 | ID_SET_DEFAULT_DIGITAL_MAPPINGS | Host→Device | Set default mappings (enter gamepad mode) |
+| 0x86 | ID_FACTORY_RESET | Host→Device | Factory reset |
+| 0x87 | ID_SET_SETTINGS_VALUES | Host→Device | Set controller settings |
+| 0x88 | ID_CLEAR_SETTINGS_VALUES | Host→Device | Clear settings |
+| 0x89 | ID_GET_SETTINGS_VALUES | Bidirectional | Get current settings |
+| 0x8A | ID_GET_SETTING_LABEL | Host→Device | Get setting label |
+| 0x8B | ID_GET_SETTINGS_MAXS | Host→Device | Get max values |
+| 0x8C | ID_GET_SETTINGS_DEFAULTS | Host→Device | Get default values |
+| 0x8D | ID_SET_CONTROLLER_MODE | Host→Device | Mode switch (lizard ↔ Steam Input) |
+| 0x8E | ID_LOAD_DEFAULT_SETTINGS | Host→Device | Load default settings |
+| 0x8F | ID_TRIGGER_HAPTIC_PULSE | Host→Device | Trigger haptic pulse |
+| 0x9F | ID_TURN_OFF_CONTROLLER | Host→Device | Turn off controller |
+| 0xA1 | ID_GET_DEVICE_INFO | Host→Device | Get device info |
+| 0xAE | ID_GET_SERIAL | Bidirectional | Get serial number |
+| 0xBA | ID_GET_CHIP_ID | Bidirectional | Get chip ID |
+| 0xF2 | Unknown | Bidirectional | Per-category capability query |
+
+## Settings Registers
+
+| Register | Name | Values |
+|----------|------|--------|
+| 0 | SETTING_MOUSE_SENSITIVITY | |
+| 1 | SETTING_MOUSE_ACCELERATION | |
+| 2 | SETTING_TRACKBALL_ROTATION_ANGLE | |
+| 3 | SETTING_HAPTIC_INTENSITY_UNUSED | |
+| 4 | SETTING_LEFT_GAMEPAD_STICK_ENABLED | |
+| 5 | SETTING_RIGHT_GAMEPAD_STICK_ENABLED | |
+| 6 | SETTING_USB_DEBUG_MODE | |
+| 7 | SETTING_LEFT_TRACKPAD_MODE | 7=None |
+| 8 | SETTING_RIGHT_TRACKPAD_MODE | 7=None |
+| 9 | SETTING_LIZARD_MODE | 0=OFF, 1=ON |
+| 10 | SETTING_DPAD_DEADZONE | |
+| 15 | SETTING_HAPTIC_INCREMENT | |
+| 21 | SETTING_SENSITIVITY_SCALE_AMOUNT | |
+| 24 | SETTING_SMOOTH_ABSOLUTE_MOUSE | |
+| 48 | SETTING_IMU_MODE | |
+| 70 | SETTING_HAPTICS_ENABLED | |
+| 79 | SETTING_HAPTIC_INTENSITY | |
+
 ### GET_ATTRIBUTES (0x83) Response Format
 
 The response contains 9 attributes, each as 1-byte tag + 4-byte LE uint32 value:

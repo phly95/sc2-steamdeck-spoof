@@ -454,11 +454,11 @@ def build_sc2_database(device_name="Steam Controller 2026"):
             (DESC_REPORT_REF, bytes([0x01, 0x01])),  # Report ID 1, Input
             (DESC_CCCD, b'\x00\x00'),
         ]),
-        (CHR_REPORT, ATT_PROP_READ | ATT_PROP_WRITE_NO_RSP, b'\x00', [
+        (CHR_REPORT, ATT_PROP_READ | ATT_PROP_WRITE_NO_RSP | ATT_PROP_WRITE, b'\x00', [
             (DESC_REPORT_REF, bytes([0x02, 0x02])),  # Report ID 2, Output
         ]),
         # SC2 Haptic Rumble Output (Report ID 0x80)
-        (CHR_REPORT, ATT_PROP_READ | ATT_PROP_WRITE_NO_RSP, b'\x00' * 10, [
+        (CHR_REPORT, ATT_PROP_READ | ATT_PROP_WRITE_NO_RSP | ATT_PROP_WRITE, b'\x00' * 10, [
             (DESC_REPORT_REF, bytes([0x80, 0x02])),  # Report ID 0x80, Output
         ]),
         (CHR_REPORT, ATT_PROP_READ | ATT_PROP_NOTIFY, b'\x00' * 4, [

@@ -64,7 +64,7 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
   - `0x81` CLEAR_MAPPINGS - acknowledges
   - `0x85` SET_DEFAULT_DIGITAL_MAPPINGS - handles mode switch
   - Unknown commands echoed with zero payload
-- **Haptic Rumble Forwarding (verified end-to-end)**: Host writes haptic output report to `/dev/hidrawN`, hog-ll strips Report ID 0x80 and sends 9-byte ATT Write Command (0x52) to handle 0x0019, Deck parses and forwards rumble to Neptune controller via `os.write()` on `/dev/hidraw3`. Verified via btmon capture and Deck logs.
+- **Haptic forwarding code ready** — `_on_haptic_write()` handler on handle 0x0019 correctly parses both 10-byte (with Report ID) and 9-byte (stripped) haptic payloads and forwards to Neptune. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets. The issue is upstream in Steam/hog-ll.
 - **Feature Report Proxy to Neptune**: Non-SC2 Feature Reports proxied to Neptune hardware via `ioctl`.
 - **Steam Client SC2 Recognition**: Steam detects Type 10 (Neptune/SC2), ProductID 4867 (0x1303), loads `controller_neptune.vdf`, auto-registers controller. 45-byte SC2 Custom reports (Report ID 0x45) verified flowing to `/dev/hidrawN` via hexdump.
 - **Bonding Key Mismatch Fix**: After Deck BT restart, stale LTK on host causes `[Errno 38] ENOSYS` on `conn.recv()`. Fix: `bluetoothctl remove C2:12:34:56:78:9A` then re-pair.
@@ -76,28 +76,32 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 
 ### 1. Fix SET_SETTINGS Register 0x09 Retry Loop (PRIMARY BLOCKER)
 - **Status**: After the initial handshake completes, Steam retries SET_SETTINGS register 0x09 (value=0x0000) every 3 seconds. `BYieldingCompleteSteamControllerRegistration` blocks at `EYldWaitForControllerDetails`. Steam does NOT read FR 0x00 back after this write — the retry is write-only. Sending CHR_REPORT notifications didn't break the loop.
-- **IMPORTANT UPDATE**: Another agent cleared stale bonding keys on the host (`bluetoothctl remove C2:12:34:56:78:9A`) and re-paired. After this, the handshake completed successfully and 45-byte SC2 Custom reports were verified flowing to the host. **The bonding key mismatch (gotcha #9) was likely the root cause** — stale LTK caused connection instability that prevented the handshake from completing properly. The protocol response fixes (capabilities bitmask, early return, etc.) may have been necessary but not sufficient on their own.
+- **RE findings**: The SET_SETTINGS buffer format is `[0x01, 0x87, 0x03, register, value_lo, value_hi, ...]`. Register 0x09 = SETTING_LIZARD_MODE, value 0 = LIZARD_MODE_OFF. Lizard mode must be OFF for haptics to work. The verification reads FR 0x00 back to check the setting took effect.
+- **IMPORTANT UPDATE**: Another agent cleared stale bonding keys on the host (`bluetoothctl remove C2:12:34:56:78:9A`) and re-paired. After this, the handshake completed successfully and 45-byte SC2 Custom reports were verified flowing to the host. **The bonding key mismatch (gotcha #9) was likely the root cause** — stale LTK caused connection instability that prevented the handshake from completing properly.
 - **Bugs fixed this session**:
   1. **`SC2_CMD_SET_MODE` AttributeError** — `main_l2cap.py:456` referenced `self.SC2_CMD_SET_MODE` but the constant was `SC2_CMD_SET_CONTROLLER_MODE`. This crashed every 0xf2 command silently, causing Steam to see empty capability data. Fixed to use `SC2_CMD_SET_DEFAULT_MAPPINGS` (the correct constant for 0x85).
   2. **Capabilities bitmask zeroed** — `ATTRIB_CAPABILITIES` (tag 2 in GET_ATTRIBUTES) was `0x00000000`. Changed to `0x4169bfff` (real SC2 value from controller logs).
   3. **SET_SETTINGS early return** — `return` before `self._pending_fr_response[report_id]` was set meant Steam never got SET_SETTINGS acknowledgment via FR 0x00 read. Fixed by removing the early return and improving the response format to include register + value echo.
-- **Root cause hypothesis**: The 0xf2 command response is still `[0xf2, 0x00, zeros]`. This command has a 1-byte payload (byte 2 varies per invocation: 0x01, 0x02, etc.) and is likely a per-category capabilities/settings query. Returning zeros tells Steam the controller has empty settings, preventing `ControllerDetails_tE` from being fully populated. **Without a btmon capture of a real SC2 handshake, we cannot determine the correct 0xf2 response format.**
+- **Root cause hypothesis**: The 0xf2 command response is still `[0xf2, 0x00, zeros]`. RE found it's a per-category capability query dispatched via switch/case. Tried returning capabilities bitmask (0x4169bfff) — didn't break the loop. Need real SC2 capture to see correct response format.
 - **What to try next**:
-  1. Verify the SET_SETTINGS loop is gone after the bonding fix by checking Deck logs for 3+ minutes
-  2. If the loop persists, capture a real SC2 handshake via `btmon -t -w /tmp/sc2_handshake.log` on the host while pairing a real SC2 controller
-  3. Analyze the Feature Report read/write sequence, specifically the 0xf2 responses
-  4. Try different 0xf2 response payloads (e.g., capability bitmask, register values)
+  1. Capture a real SC2 handshake via `btmon -t -w /tmp/sc2_handshake.log` on the host while pairing a real SC2 controller
+  2. Analyze the Feature Report read/write sequence, specifically the 0xf2 responses
+  3. Try different 0xf2 response payloads (e.g., register values for each category)
 
-### 2. Investigate `set_report_cb()` ATT Error on Host
-- **Status**: `hog-lib.c:set_report_cb() Error setting Report value: Request attribute has encountered an unlikely error` appears at connection time. hog-ll fails to set an output report via ATT. This may be related to the bonding key mismatch (gotcha #9) — when the host uses stale keys, the connection aborts mid-handshake, causing ATT errors.
+### 2. Investigate `set_report_cb()` ATT Error on Host (LIKELY ROOT CAUSE)
+- **Status**: `hog-lib.c:set_report_cb() Error setting Report value: Request attribute has encountered an unlikely error` appears at connection time. btmon capture confirmed hog-ll discovers the output report handle (0x0019) but **never writes to it**. This error may put hog-ll in a state where it can't send output reports — explaining why zero ATT Write Command (0x52) packets are sent.
 - **What to try next**:
-  1. Clear bonding keys and re-pair — the error may disappear with a clean connection
-  2. If it persists, add diagnostic logging to `_handle_write` to identify the failing handle
-  3. Check if the handle has correct permissions (WRITE vs WRITE_NO_RSP)
+  1. Determine which handle hog-ll is writing to when this error occurs (add diagnostic logging to `_handle_write`)
+  2. Check if the handle has correct permissions (added ATT_PROP_WRITE to output report characteristics)
+  3. Check if the error is related to the BLE path specifically (BLE vs USB code paths)
 
-### 3. Haptic Feedback (VERIFIED WORKING)
-- **Status**: Haptics work end-to-end. Host writes 10-byte haptic output report to `/dev/hidrawN`, hog-ll strips Report ID 0x80 and sends 9-byte ATT Write Command (0x52) to handle 0x0019, Deck parses and forwards rumble to Neptune controller via `os.write()` on `/dev/hidraw3`. Verified via btmon capture and Deck logs.
-- **Key finding**: hog-ll strips the Report ID byte before the ATT write. The `_on_haptic_write()` handler now handles both formats: 10-byte (with Report ID 0x80) and 9-byte (stripped).
+### 3. Haptic Feedback (HOST NOT SENDING)
+- **Status**: The haptic forwarding code is ready and correct — `_on_haptic_write()` on handle 0x0019 parses both 10-byte and 9-byte payloads. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets during a test session. The issue is upstream in Steam/hog-ll.
+- **RE findings**: Haptics use `SDL_hid_write()` (output reports, NOT feature reports). Lizard mode must be OFF for haptics to work. The SET_SETTINGS 0x09 loop may be blocking haptics because Steam thinks lizard mode is still enabled.
+- **What to try next**:
+  1. Fix the `set_report_cb()` error — this may be blocking hog-ll from sending output reports
+  2. Fix the SET_SETTINGS 0x09 loop — lizard mode must be OFF for haptics
+  3. Get a real SC2 btmon capture to see the correct verification response
 
 ### 4. Dual Trackpads & IMU (Gyro/Accel) Forwarding
 - **Status**: 45-byte SC2 Custom report with trackpad X/Y, IMU (accel/gyro), and force sensors is **already implemented** in `input_handler.py`. The data flows correctly from Neptune HID → SC2 report.
@@ -131,6 +135,14 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
   8. `0x81` CLEAR_MAPPINGS → write-only (exits lizard mode)
   9. `0x85` SET_DEFAULT_DIGITAL_MAPPINGS → write-only (enters gamepad mode)
   10. `0x8D` SET_CONTROLLER_MODE → mode switch (lizard ↔ Steam Input)
+
+### 5. Reverse Engineering Findings (from steamclient.so)
+- **ControllerDetails_tE**: 84 bytes (0x54), ready_flag at offset 0x3c must be 1. Set by QueueFetchingControllerDetails at 0x01092820. Fields come from controller object offsets 0x84-0xd4.
+- **Product ID check**: 0x1303 is in recognized range (0x1302-0x1305). Other recognized types: 0x1142, 0x1220, 0x1201-0x1206, 0x1101-0x1102.
+- **Haptic path**: Uses SDL_hid_write() (output reports), NOT SDL_hid_send_feature_report(). Report ID 0x80, 10 bytes. Lizard mode must be OFF for haptics to work.
+- **SET_SETTINGS format**: `[0x01, 0x87, 0x03, register, value_lo, value_hi, ...]`. Register 0x09 = SETTING_LIZARD_MODE, value 0 = OFF.
+- **0xf2 command**: Per-category capability query dispatched via switch/case. Exact response format unknown.
+- **RE session files**: ~/steamclient-reverse-session/ contains findings.md, functions/, notes/
 
 ---
 

@@ -458,7 +458,7 @@ class HoGPeripheral:
                 self._settings_store[register] = data_val[0]
             else:
                 self._settings_store[register] = 0
-            # Respond with command echo + register echo + value echo (like GET_SETTINGS_VALUES)
+            # Respond with command echo + register echo + value echo
             response = bytearray([
                 0x87,       # header.type = ID_SET_SETTINGS_VALUES
                 payload_len + 1,  # header.length = register(1) + value
@@ -492,6 +492,36 @@ class HoGPeripheral:
                 response += bytes([reg, val & 0xFF, (val >> 8) & 0xFF])
             response += bytearray(64 - len(response))
             print(f"[DIAG] 🎮 → GET_SETTINGS_VALUES: returning {num_regs} registers")
+
+        elif cmd == 0xf2:
+            # Unknown command 0xf2 — per-category capability/settings query
+            # Payload byte (value[2]) is the category index (0x01, 0x02, etc.)
+            # Try returning capability data for each category
+            category = value[2] if len(value) > 2 else 0
+            print(f"[DIAG] 🎮 → Command 0xf2: category=0x{category:02x}")
+            
+            if category == 0x01:
+                # Category 1: Return capabilities bitmask (0x4169bfff)
+                response = bytearray([
+                    0xf2,       # header.type = 0xf2
+                    category,   # echo category
+                    0x04,       # length = 4 bytes
+                    0xff, 0xbf, 0x69, 0x41,  # capabilities bitmask (LE)
+                ])
+                response += bytearray(64 - len(response))
+            elif category == 0x02:
+                # Category 2: Return settings register values
+                # Format: [0xf2, category, num_regs, reg, val_lo, val_hi, ...]
+                response = bytearray([0xf2, category, len(self._settings_store)])
+                for reg, val in sorted(self._settings_store.items()):
+                    response += bytes([reg, val & 0xFF, (val >> 8) & 0xFF])
+                response += bytearray(64 - len(response))
+            else:
+                # Unknown category — return zeros
+                response = bytearray([0xf2, category, 0x00])
+                response += bytearray(64 - len(response))
+            
+            print(f"[DIAG] 🎮 → 0xf2 response: {response[:20].hex()}...")
 
         elif cmd == self.SC2_CMD_SET_DEFAULT_MAPPINGS:
             # SET_MODE (0x85) — Handle mode switch, echo back with proper header
