@@ -211,7 +211,15 @@ class HoGPeripheral:
         SC2 report characteristic or CHR_REPORT, forward it to the Neptune
         controller via os.write() on the hidraw device.
         """
-        # Register on both the Valve Custom Service report char and the HID Service CHR_REPORT
+        # Find and register on the actual Output Report ID 0x80 characteristic handle
+        haptic_handle = self._find_report_char_handle(0x80, 0x02)
+        if haptic_handle:
+            print(f"[+] Registering haptic callback on HID Haptic (0x80 Output) handle 0x{haptic_handle:04x}")
+            self.gatt_db.write_callbacks[haptic_handle] = lambda value, h=haptic_handle: self._on_haptic_write(h, value)
+        else:
+            print("[-] WARNING: HID Haptic (0x80 Output) characteristic handle not found")
+
+        # Keep registrations on custom and standard input reports just in case
         for label, handle in [("Valve Custom", self._sc2_report_handle), ("HID Service", self._sc2_hid_handle)]:
             if handle:
                 print(f"[+] Registering haptic callback on {label} handle 0x{handle:04x}")
@@ -222,6 +230,7 @@ class HoGPeripheral:
 
         Parses the report ID and forwards haptic commands to Neptune.
         """
+        print(f"[haptic] Write callback triggered on handle 0x{handle:04x} len={len(value)} data={value.hex()}")
         if len(value) < 1:
             return
         report_id = value[0]
@@ -237,7 +246,19 @@ class HoGPeripheral:
             # value[9] = right.gain (int8)
             left_speed = struct.unpack_from('<H', value, 4)[0]
             right_speed = struct.unpack_from('<H', value, 7)[0]
-            print(f"[haptic] Rumble: left={left_speed} right={right_speed}")
+            print(f"[haptic] Rumble (Report ID 0x80): left={left_speed} right={right_speed}")
+            self._forward_haptic_to_neptune(left_speed, right_speed)
+        elif len(value) == 9:
+            # Report ID 0x80 was stripped by hog-ll, value is just the payload:
+            # value[0] = type (uint8)
+            # value[1-2] = intensity (uint16 LE)
+            # value[3-4] = left.speed (uint16 LE)
+            # value[5] = left.gain (int8)
+            # value[6-7] = right.speed (uint16 LE)
+            # value[8] = right.gain (int8)
+            left_speed = struct.unpack_from('<H', value, 3)[0]
+            right_speed = struct.unpack_from('<H', value, 6)[0]
+            print(f"[haptic] Rumble (Stripped Report ID): left={left_speed} right={right_speed}")
             self._forward_haptic_to_neptune(left_speed, right_speed)
         else:
             # Unknown output report — forward raw to Neptune
@@ -252,7 +273,7 @@ class HoGPeripheral:
             # Report: [0x80, left_intensity(2 LE), left_period(2 LE), right_intensity(2 LE), right_period(2 LE)]
             left_i = min(0xFFFF, left_speed)
             right_i = min(0xFFFF, right_speed)
-            report = struct.pack('<BHHH', 0x80, left_i, 0, right_i, 0)
+            report = struct.pack('<BHHHH', 0x80, left_i, 0, right_i, 0)
             self._write_neptune_output(report)
         except Exception as e:
             print(f"[-] Haptic forward error: {e}")
@@ -362,8 +383,10 @@ class HoGPeripheral:
                 0x2d,       # header.length = 45 (9 attributes x 5 bytes)
                 # Attribute: ATTRIB_PRODUCT_ID (tag=1) = 0x1303 (SC2 BLE PID)
                 0x01, 0x03, 0x13, 0x00, 0x00,
-                # Attribute: ATTRIB_CAPABILITIES (tag=2) = 0
-                0x02, 0x00, 0x00, 0x00, 0x00,
+                # Attribute: ATTRIB_CAPABILITIES (tag=2) = 0x4169bfff (real SC2 value)
+                # Bits: buttons(0-9), triggers(10-19), joysticks(20-25), trackpads(26-29),
+                #       IMU(30-31), haptics(37), dual trackpads(39)
+                0x02, 0xff, 0xbf, 0x69, 0x41,
                 # Attribute: ATTRIB_BOOTLOADER_BUILD_TIME (tag=10)
                 0x0a, 0x2b, 0x12, 0xa9, 0x62,
                 # Attribute: ATTRIB_FIRMWARE_BUILD_TIME (tag=4)
@@ -425,17 +448,36 @@ class HoGPeripheral:
             # SET_ATTRIBUTES (0x87) — Write-only command, but Steam may read FR 0x00
             # to verify the write succeeded. Store a success response.
             register = value[3] if len(value) > 3 else 0
-            data_val = value[4:6] if len(value) >= 6 else b'\x00\x00'
-            print(f"[DIAG] 🎮 → SET_SETTINGS register=0x{register:02x} value=0x{data_val.hex()}")
+            payload_len = value[2] if len(value) > 2 else 0
+            data_val = value[4:4+payload_len] if len(value) >= 4 + payload_len else value[4:6]
+            print(f"[DIAG] 🎮 → SET_SETTINGS register=0x{register:02x} payload_len={payload_len} data={data_val.hex()}")
             # Store the setting so GET_SETTINGS_VALUES can return it
-            self._settings_store[register] = struct.unpack_from('<H', data_val)[0] if len(data_val) >= 2 else 0
-            # Respond with command echo + success
+            if len(data_val) >= 2:
+                self._settings_store[register] = struct.unpack_from('<H', data_val)[0]
+            elif len(data_val) == 1:
+                self._settings_store[register] = data_val[0]
+            else:
+                self._settings_store[register] = 0
+            # Respond with command echo + register echo + value echo (like GET_SETTINGS_VALUES)
             response = bytearray([
                 0x87,       # header.type = ID_SET_SETTINGS_VALUES
-                0x00,       # header.length = 0 (ack)
+                payload_len + 1,  # header.length = register(1) + value
+                register,
             ])
+            response += data_val
             response += bytearray(64 - len(response))
-            return
+            # Send acknowledgment notification on CHR_REPORT so Steam knows settings were applied
+            ack = bytearray([
+                0x87,       # header.type = SET_SETTINGS ack
+                0x01,       # header.length = 1 (register only)
+                register,
+            ])
+            ack += bytearray(64 - len(ack))
+            if self._sc2_hid_handle and self.att_server:
+                self.att_server.send_notification(self._sc2_hid_handle, bytes(ack))
+                print(f"[DIAG] 🎮 → SET_SETTINGS 0x{register:02x} ack notification sent on CHR_REPORT")
+            if self._sc2_report_handle and self.att_server:
+                self.att_server.send_notification(self._sc2_report_handle, bytes(ack))
 
         elif cmd == self.SC2_CMD_GET_SETTINGS_VALUES:
             # GET_SETTINGS_VALUES (0x89) — Return current settings for requested registers.
@@ -451,7 +493,7 @@ class HoGPeripheral:
             response += bytearray(64 - len(response))
             print(f"[DIAG] 🎮 → GET_SETTINGS_VALUES: returning {num_regs} registers")
 
-        elif cmd == self.SC2_CMD_SET_MODE:
+        elif cmd == self.SC2_CMD_SET_DEFAULT_MAPPINGS:
             # SET_MODE (0x85) — Handle mode switch, echo back with proper header
             self._handle_mode_switch(value)
             response = bytearray([

@@ -14,17 +14,34 @@ set -euo pipefail
 
 DECK_HOST="deck@<DECK_IP>"
 SSH_OPTS="-o StrictHostKeyChecking=no"
-SSH_CMD="sshpass -p '<DECK_PASSWORD>' ssh $SSH_OPTS $DECK_HOST"
+SSH_CMD="sshpass -p <DECK_PASSWORD> ssh $SSH_OPTS $DECK_HOST"
 
 LOG_LINES=10
 SHOW_BT=false
 SHOW_INPUT=false
 
-for arg in "$@"; do
-    case "$arg" in
-        --logs) LOG_LINES="${2:-10}"; shift 2 ;;
-        --bt) SHOW_BT=true ;;
-        --input) SHOW_INPUT=true ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --logs)
+            if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
+                LOG_LINES="$2"
+                shift 2
+            else
+                LOG_LINES=10
+                shift 1
+            fi
+            ;;
+        --bt)
+            SHOW_BT=true
+            shift 1
+            ;;
+        --input)
+            SHOW_INPUT=true
+            shift 1
+            ;;
+        *)
+            shift 1
+            ;;
     esac
 done
 

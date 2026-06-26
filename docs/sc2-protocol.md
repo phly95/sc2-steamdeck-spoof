@@ -154,11 +154,39 @@ Key strings from Steam Client:
 
 | Report ID | Direction | Description |
 |-----------|-----------|-------------|
-| 0x00 | Device → Host | Device identification (0x87 0x03 0x09...) |
+| 0x00 | Device ↔ Host | SC2 command channel (GET_ATTRIBUTES, SET_SETTINGS, etc.) |
 | 0x01 | Device → Host | Device capabilities |
 | 0x85 | Host → Device | Mode switch (lizard/Steam Input) |
 | 0x86 | Host → Device | Configuration |
 | 0x87 | Host → Device | Calibration data |
+
+### GET_ATTRIBUTES (0x83) Response Format
+
+The response contains 9 attributes, each as 1-byte tag + 4-byte LE uint32 value:
+
+| Tag | Name | Real SC2 Value | Description |
+|-----|------|----------------|-------------|
+| 1 | ATTRIB_PRODUCT_ID | 0x1303 | SC2 BLE Product ID |
+| 2 | ATTRIB_CAPABILITIES | 0x4169bfff | Feature capabilities bitmask |
+| 4 | ATTRIB_FIRMWARE_BUILD_TIME | 0x65E4F1AD | Firmware build timestamp |
+| 9 | ATTRIB_BOARD_REVISION | 46 | Hardware board revision |
+| 10 | ATTRIB_BOOTLOADER_BUILD_TIME | varies | Bootloader build timestamp |
+| 11 | ATTRIB_CONNECTION_INTERVAL_IN_US | 4000 | BLE connection interval |
+| 12 | ATTRIB_12 | 0 | Unknown |
+| 13 | ATTRIB_13 | 0 | Unknown |
+| 14 | ATTRIB_14 | 0 | Unknown |
+
+### Capabilities Bitmask (0x4169bfff)
+
+```
+Bit 0-9:   Buttons (A, B, X, Y, QAM, R3, View, R4, R5, R)
+Bit 10-19: Triggers, D-Pad, Menu, L3, Steam, L4, L5, L
+Bit 20-25: Joystick touch, Trackpad touch/click
+Bit 26-29: Trigger clicks, Grip touch
+Bit 30-31: IMU
+Bit 37:    Haptics
+Bit 39:    Dual trackpads
+```
 
 ## Pairing
 

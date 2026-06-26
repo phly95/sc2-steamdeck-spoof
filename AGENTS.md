@@ -81,17 +81,19 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 - **Physical Deck controller input works** — reads from `/dev/hidraw3` (Neptune HID, 64-byte reports).
 - Input handler maps Neptune buttons → SC2 12-byte report format (Y axis inverted correctly).
 - **Standard HID gamepad reports flow** — Host detects generic gamepad via KDE Game Controller and Steam Controller Settings.
-- Connection stable for 5+ minutes (use `connect` not `pair`).
+- **45-byte SC2 Custom reports flow** — Host receives Report ID 0x45 reports via `/dev/hidrawN`, verified via hexdump.
+- Connection stable for 5+ minutes (use `connect` not `pair`). Clear stale bonding keys after Deck BT restart.
 - **Synthetic SC2 Command Handler** — Feature Report 0x00 (SC2 command channel) intercepted locally. Handles GET_ATTRIBUTES, GET_SERIAL, CLEAR_MAPPINGS, SET_ATTRIBUTES, SET_MODE with synthetic SC2 device info responses matching real device byte layout.
 - **Neptune Auto-Recovery** — Input handler retries opening hidraw device on crash (2s delay, 10 retries).
 - **CHR_REPORT SC2 Custom in HID Service** — Report IDs 0x45 (45-byte) and 0x47 (47-byte) in HID Service for hog-ll subscription. Dual notification targets: Valve Custom Service + HID Service CHR_REPORT.
+- **Haptic feedback end-to-end** — Host writes haptic output report to `/dev/hidrawN`, hog-ll strips Report ID and sends 9-byte ATT Write Command (0x52) to handle 0x0019, Deck parses and forwards rumble to Neptune controller via `os.write()` on `/dev/hidraw3`.
 
 ### What Needs to Happen Next
 
-1. **Fix SET_SETTINGS Handshake Loop** — After the initial handshake (GET_ATTRIBUTES → GET_SERIAL → SET_SETTINGS → CLEAR_MAPPINGS), Steam falls into a retry loop on SET_SETTINGS register 0x09 (LIZARD_MODE). The `BYieldingCompleteSteamControllerRegistration` flow blocks at `EYldWaitForControllerDetails`. Need to investigate what response format Steam expects, or what notification triggers it to proceed.
-2. **Investigate Unknown Command 0xf2** — This command is sent 8 times during the initial handshake. Our zero-payload echo may be wrong. Need to determine the correct response.
-3. **Fix Handshake Repetition** — The GET_ATTRIBUTES → 0xf2 × 8 → GET_SERIAL → SET_SETTINGS sequence repeats, suggesting a response is wrong. Need to identify which response causes Steam to restart the handshake.
-4. **Haptic Feedback** — The haptic output report (0x80) is defined in the GATT database, but hog-ll doesn't forward output report writes to our ATT server. Need to find an alternative mechanism or patch hog-ll.
+1. **Fix SET_SETTINGS Register 0x09 Retry Loop** — After the initial handshake completes (GET_ATTRIBUTES → 0xf2 → GET_SERIAL → SET_SETTINGS → CLEAR_MAPPINGS), Steam retries SET_SETTINGS register 0x09 (value=0x0000, likely lizard mode disable) every 3 seconds. `BYieldingCompleteSteamControllerRegistration` blocks at `EYldWaitForControllerDetails`. Steam does NOT read FR 0x00 back after this write — the retry is write-only. Sending CHR_REPORT notifications didn't break the loop. **Hypothesis: the 0xf2 response (still zeros) is the real blocker** — Steam can't populate ControllerDetails because it gets empty capability data. Need a btmon capture of a real SC2 handshake to see the 0xf2 response format.
+2. **Investigate Unknown Command 0xf2** — Sent 1x during the initial handshake (was 8x before fixing the AttributeError bug — the 8x was from handshake repetitions). Response is still `[0xf2, 0x00, zeros]`. This command has a 1-byte payload (byte 2 = 0x01, 0x02, etc. — varies per invocation). Likely a per-category capabilities/settings query. **Without a real SC2 capture, we cannot determine the correct response format.**
+3. **Investigate `set_report_cb()` ATT Error on Host** — `hog-lib.c:set_report_cb() Error setting Report value: Request attribute has encountered an unlikely error` appears at connection time. hog-ll fails to set an output report. This may block the uhid device initialization. Need to determine which handle hog-ll is writing to and why the ATT write fails.
+4. **Haptic Feedback** — The haptic output report (0x80) is defined in the GATT database. BlueZ's hog-ll DOES forward output report writes as ATT Write Commands (0x52) — confirmed via source code analysis. The likely issue is that the Report ID byte gets stripped by hog-ll before the ATT write, so our `_on_haptic_write()` handler doesn't recognize the 0x80 prefix. Need to test with diagnostic logging.
 
 ### Files You Must Read Before Making Changes
 
@@ -500,6 +502,8 @@ Sticks, triggers, trackpads, IMU — see `docs/sc2-protocol.md` for full format.
 6. **`btmgmt info` output is empty** — known SteamOS issue, ignore it
 7. **`steamos-readonly`** — must disable before modifying `/etc/`
 8. **KDE pairing dialog** — host shows dialog during pairing, user must click "yes"
+9. **Stale bonding keys cause `[Errno 38] ENOSYS`** — When the Deck's Bluetooth stack is restarted, its SMP pairing database is cleared, but the host still caches the old LTK. The host tries to encrypt with the stale key, the Deck rejects it, and the L2CAP socket is left in a broken state where `conn.recv()` returns `ENOSYS`. Fix: `bluetoothctl remove C2:12:34:56:78:9A` on the host, then re-pair.
+10. **hog-ll strips Report ID from output reports** — When the host writes an output report (e.g., haptic 0x80) to `/dev/hidrawN`, hog-ll strips the Report ID byte before sending the ATT Write Command (0x52). The `_on_haptic_write()` handler must parse the 9-byte payload without the 0x80 prefix (type at [0], left speed at [3], right speed at [6]).
 
 ---
 
