@@ -504,18 +504,10 @@ class HoGPeripheral:
             ])
             response += data_val
             response += bytearray(64 - len(response))
-            # Send acknowledgment notification on CHR_REPORT so Steam knows settings were applied
-            ack = bytearray([
-                0x87,       # header.type = SET_SETTINGS ack
-                0x01,       # header.length = 1 (register only)
-                register,
-            ])
-            ack += bytearray(64 - len(ack))
-            if self._sc2_hid_handle and self.att_server:
-                self.att_server.send_notification(self._sc2_hid_handle, bytes(ack))
-                print(f"[DIAG] 🎮 → SET_SETTINGS 0x{register:02x} ack notification sent on CHR_REPORT")
-            if self._sc2_report_handle and self.att_server:
-                self.att_server.send_notification(self._sc2_report_handle, bytes(ack))
+            # NOTE: Do NOT send ack notification on CHR_REPORT handles.
+            # Sending non-zero data on input report handles causes phantom button presses
+            # because the host interprets the ack bytes [0x87, 0x01, register] as a
+            # 45-byte SC2 input report with non-zero button bitmask.
 
         elif cmd == self.SC2_CMD_GET_SETTINGS_VALUES:
             # GET_SETTINGS_VALUES (0x89) — Return current settings for requested registers.
