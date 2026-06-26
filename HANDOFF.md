@@ -74,53 +74,75 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 
 ## 3. What Needs to be Done
 
-### 1. Fix SET_SETTINGS Register 0x09 Verification Loop (PRIMARY BLOCKER)
-- **Status**: This is NOT a haptics issue — it blocks ALL functionality (input, gyro, trackpads, haptics) because controller registration never completes. Steam sends SET_SETTINGS 0x09 (lizard mode OFF) and **the verification read never happens** — zero ATT Read Requests follow the SET_SETTINGS write. However, the full handshake DOES work: GET_ATTRIBUTES (0x83), 0xf2, GET_SERIAL (0xAE) all get write-then-read cycles (BlueZ sends real ATT Read Requests 0x0a to handle 0x0024). This proves the verification mechanism works — it just doesn't fire for SET_SETTINGS specifically. **The state machine at 0x010d466b should toggle between SEND and VERIFY, but never reaches VERIFY for SET_SETTINGS.** Root cause is likely that SET_SETTINGS uses a different IPC path than the verification read, or the state machine has a condition that prevents the toggle. **Known bug in response format**: `payload_len + 1` (line 464, main_l2cap.py) should be `payload_len` — length byte is 0x04 instead of 0x03.
-- **RE findings**: The SET_SETTINGS buffer format is `[0x01, 0x87, 0x03, register, value_lo, value_hi, ...]`. Register 0x09 = SETTING_LIZARD_MODE, value 0 = LIZARD_MODE_OFF. Lizard mode must be OFF for haptics to work. The verification reads FR 0x00 back and does a byte-by-byte comparison of the echoed command bytes.
+### 1. Fix Controller Registration (PRIMARY BLOCKER)
+- **Status**: This blocks ALL functionality (input, gyro, trackpads, haptics). `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" 10+ times. The controller opens, reserves XInput slot, starts polling, then becomes zombie within 6 seconds. 44 registration attempts, 412 zombie disconnections since Jun 24.
+- **CONFIRMED (2026-06-26)**: The SET_SETTINGS 0x09 retry loop is **noise** (not a blocker):
+  - SDL3 confirms: SET_SETTINGS is fire-and-forget (no `SDL_hid_get_feature_report()` after send)
+  - State machine at 0x010d466b skips VERIFY because r13 is NULL (by design)
+  - `[r15+0x208]` is a "test mode" flag — always 0 in normal operation, so vtable dispatch is SKIPPED
+  - SET_SETTINGS runs in CHIDIOThread (worker thread), registration runs on main thread — they don't block each other
+  - Deferred notification fix tested — did NOT fix the issue
+- **Root cause**: `CGetControllerInfoWorkItem` reads controller details from the IPC pipe but the read fails. Likely because our ATT server's responses don't match the expected format, or the IPC pipe isn't set up correctly.
+- **Steam controller log shows**:
+  ```
+  CGetControllerInfoWorkItem::RunFunc: Read failure. (×10)
+  Warning, couldn't get controller details for SC, PID=4867
+  GetControllerInfo failed - executed 1, success 0
+  Controller uses V1 HID protocol via BLE
+  !! Steam controller device opened for index 0
+  Steam Controller reserving XInput slot 0
+  Controller PollState Changed from 0 to 1
+  Disconnecting zombie controller 0  (6 seconds later)
+  ```
 - **What to try next**:
-  1. Investigate why the state machine never reaches VERIFY for SET_SETTINGS — trace the binary at 0x010d4e1a to find the condition that prevents the toggle
-  2. Check if SET_SETTINGS uses a different IPC path than the verification read
-  3. Fix the `payload_len + 1` → `payload_len` bug (line 464, main_l2cap.py)
-  4. Check if the ControllerDetails_tE.ready_flag (offset 0x3c) is the real blocker
-
-### 2. `set_report_cb()` ATT Error (NOT THE ROOT CAUSE)
-- **Status**: The error is `ATT_ERR_INSUFFICIENT_ENCRYPTION_KEY_SIZE (0x0C)`, NOT 0x0E (Unlikely Error). This is a transient error — BlueZ clears the slot, replies to UHID, and continues. No degraded state, no blocked queue, no state machine affected. GET_REPORT works fine after the error. **This is NOT the root cause of the SET_SETTINGS loop.**
-- **What was confirmed**: BlueZ's HOG profile sends the error to UHID, which passes it to the kernel, which passes it to Steam. But the error doesn't block subsequent operations.
+  1. Trace `CGetControllerInfoWorkItem::RunFunc` in the binary to find what it reads and what format it expects
+  2. Check if our GET_ATTRIBUTES/0xf2/GET_SERIAL responses match the expected IPC message format
+  3. Verify the IPC pipe is set up correctly (hiddevicepipesteam.cpp at 0x00c8ce9a)
 
 ### 3. Haptic Feedback (HOST NOT SENDING)
 - **Status**: The haptic forwarding code is ready and correct — `_on_haptic_write()` on handle 0x0019 parses both 10-byte and 9-byte payloads. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets during a test session. The issue is upstream in Steam/hog-ll.
-- **RE findings**: Haptics use `SDL_hid_write()` (output reports, NOT feature reports). Lizard mode must be OFF for haptics to work. The SET_SETTINGS 0x09 loop may be blocking haptics because Steam thinks lizard mode is still enabled.
+- **RE findings**: Haptics use `SDL_hid_write()` (output reports, NOT feature reports). Lizard mode must be OFF for haptics to work.
+- **Note**: The SET_SETTINGS 0x09 retry loop is confirmed to be noise (not a blocker). It does not affect haptics.
 - **What to try next**:
-  1. Fix the SET_SETTINGS 0x09 loop — lizard mode must be OFF for haptics
-  2. Get a real SC2 btmon capture to see the correct verification response
+  1. Fix the controller registration first — haptics won't work until the controller is stable
+  2. Get a real SC2 btmon capture to see if haptics work on a real device
 
 ### 4. Dual Trackpads & IMU (Gyro/Accel) Forwarding
 - **Status**: 45-byte SC2 Custom report with trackpad X/Y, IMU (accel/gyro), and force sensors is **already implemented** in `input_handler.py`. The data flows correctly from Neptune HID → SC2 report.
 - **Remaining**: Steam may need specific settings enabled to activate gyro/trackpad features (registers 0x27 IMU_MODE, etc.).
 
-### 5. Auto-Reconnect Daemon
+### 6. Auto-Reconnect Daemon
 - **Status**: Advertising refresh on disconnect is **already implemented** in `main_l2cap.py:_schedule_adv_refresh()`.
 - **Remaining**: Ensure clean re-advertising after disconnects without manual intervention.
-- **Root cause hypothesis**: The `set_report_cb()` ATT error (BlueZ returns 0x0E to a SET_REPORT Write Request) puts the HOG profile in a broken state where it cannot send feature report reads. This explains why the verification never reads FR 0x00.
 - **Key commands in the SC2 protocol flow**:
   1. `0x83` GET_ATTRIBUTES → response: `[0x83, 0x2D, 9 attributes x 5 bytes, padding]`
   2. `0xF2` Unknown (1-byte payload varies: 0x01, 0x02, etc.) → response: `[0xF2, 0x00, zeros]` (STILL WRONG — needs real SC2 capture)
   3. `0xAE` GET_SERIAL → response: `[0xAE, 0x14, 0x01, serial_ascii, padding]`
   4. `0xBA` GET_CHIP_ID → response: `[0xBA, 0x11, 0x00, 15-byte chip_id, padding]`
-  5. `0x87` SET_SETTINGS → write-only (configures registers), now includes ack notification
+  5. `0x87` SET_SETTINGS → write-only (configures registers), verification read NEVER happens (by design — SDL3 confirms fire-and-forget)
   6. `0x89` GET_SETTINGS_VALUES → response: stored register values
   7. `0xC1`/`0xDC`/0xE2` Unknown → echo with zero payload
   8. `0x81` CLEAR_MAPPINGS → write-only (exits lizard mode)
   9. `0x85` SET_DEFAULT_DIGITAL_MAPPINGS → write-only (enters gamepad mode)
   10. `0x8D` SET_CONTROLLER_MODE → mode switch (lizard ↔ Steam Input)
 
-### 5. Reverse Engineering Findings (from steamclient.so)
+### 7. Reverse Engineering Findings (from steamclient.so)
 - **ControllerDetails_tE**: 84 bytes (0x54), ready_flag at offset 0x3c must be 1. Set by QueueFetchingControllerDetails at 0x01092820. Fields come from controller object offsets 0x84-0xd4.
 - **Product ID check**: 0x1303 is in recognized range (0x1302-0x1305). Other recognized types: 0x1142, 0x1220, 0x1201-0x1206, 0x1101-0x1102.
 - **Haptic path**: Uses SDL_hid_write() (output reports), NOT SDL_hid_send_feature_report(). Report ID 0x80, 10 bytes. Lizard mode must be OFF for haptics to work.
-- **SET_SETTINGS format**: `[0x01, 0x87, 0x03, register, value_lo, value_hi, ...]`. Register 0x09 = SETTING_LIZARD_MODE, value 0 = OFF.
+- **SET_SETTINGS is fire-and-forget**: SDL3 confirms no `SDL_hid_get_feature_report()` after send. State machine at 0x010d466b skips VERIFY because r13 is NULL. `[r15+0x208]` is a "test mode" flag — always 0 in normal operation.
+- **CGetControllerInfoWorkItem**: Reads controller details from IPC pipe. Fails with "Read failure" — this is the actual registration blocker. RTTI at unknown address (needs tracing).
+- **CHIDIOThread**: Processes HID I/O work items. String at 0x00d6fbc2. SET_SETTINGS work items are queued here.
+- **IPC pipe**: hiddevicepipesteam.cpp (string at 0x00c8ce9a). Connects steamclient.so to CHIDIOThread.
+- **SDL_hid_send_feature_report**: Resolved via dlsym at 0x01760fa2, stored at 0x02c69a28.
 - **0xf2 command**: Per-category capability query dispatched via switch/case. Exact response format unknown.
 - **RE session files**: ~/steamclient-reverse-session/ contains findings.md, functions/, notes/
+  - `functions/handshake_completion.c` — SET_SETTINGS retry is noise, registration runs independently
+  - `functions/hid_write_failure.c` — vtable[0x10] skipped because [r15+0x208]=0
+  - `functions/retry_mechanism.c` — 3-second retry for failed HID writes
+  - `functions/sdl3_verification.c` — SDL3 confirms fire-and-forget
+  - `functions/set_settings_path.c` — SET_SETTINGS goes through state machine
+  - `functions/verify_branch.c` — r13=NULL causes VERIFY skip
 
 ---
 

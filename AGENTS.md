@@ -67,6 +67,8 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 
 ### Current Status
 
+**⚠️ NOTE: The current version does NOT have working input.** The controller connects, Steam detects it, but registration fails because `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" and the controller becomes zombie within 6 seconds. See "What Needs to Happen Next" for details.
+
 **✅ Working (End-to-End):**
 - Raw L2CAP ATT server accepts connections on CID 4.
 - MTU exchange succeeds (negotiated 517).
@@ -88,12 +90,18 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 - **CHR_REPORT SC2 Custom in HID Service** — Report IDs 0x45 (45-byte) and 0x47 (47-byte) in HID Service for hog-ll subscription. Dual notification targets: Valve Custom Service + HID Service CHR_REPORT.
 - **Haptic forwarding code ready** — `_on_haptic_write()` handler on handle 0x0019 correctly parses both 10-byte (with Report ID) and 9-byte (stripped) haptic payloads and forwards to Neptune. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets. The issue is upstream in Steam/hog-ll.
 
+**❌ Not Working:**
+- **Controller registration fails** — `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" 10+ times, controller becomes zombie within 6 seconds of opening. 44 registration attempts, 412 zombie disconnections since Jun 24.
+- **Input not reaching Steam** — controller registers briefly then dies. No stable input.
+- **SET_SETTINGS 0x09 retry loop** — confirmed to be **noise** (not a blocker). The feature report is never sent because `[r15+0x208]` is 0 (test mode flag). SDL3 confirms SET_SETTINGS is fire-and-forget.
+
 ### What Needs to Happen Next
 
-1. **Fix SET_SETTINGS Register 0x09 Verification Loop (CONTROLLER REGISTRATION BLOCKER)** — This is NOT a haptics issue — it blocks ALL functionality (input, gyro, trackpads, haptics) because controller registration never completes. Steam sends SET_SETTINGS 0x09 (lizard mode OFF) and **the verification read never happens** — zero ATT Read Requests follow the SET_SETTINGS write. However, the full handshake DOES work: GET_ATTRIBUTES (0x83), 0xf2, GET_SERIAL (0xAE) all get write-then-read cycles (BlueZ sends real ATT Read Requests 0x0a to handle 0x0024). This proves the verification mechanism works — it just doesn't fire for SET_SETTINGS specifically. **The state machine at 0x010d466b should toggle between SEND and VERIFY, but never reaches VERIFY for SET_SETTINGS.** Root cause is likely that SET_SETTINGS uses a different IPC path than the verification read, or the state machine has a condition that prevents the toggle. **Known bug in response format**: `payload_len + 1` (line 464, main_l2cap.py) should be `payload_len` — length byte is 0x04 instead of 0x03.
-2. **BlueZ HOG Profile is Healthy** — The `set_report_cb()` error is `ATT_ERR_INSUFFICIENT_ENCRYPTION_KEY_SIZE (0x0C)`, NOT 0x0E (Unlikely Error). This error is transient — BlueZ clears the slot, replies to UHID, and continues. No degraded state, no blocked queue, no state machine affected. GET_REPORT works fine after the error. **This is NOT the root cause of the SET_SETTINGS loop.**
-3. **Command 0xf2 Response Format** — RE found it's a per-category capability query dispatched via switch/case. Tried returning capabilities bitmask (0x4169bfff) — didn't break the loop. Need real SC2 capture.
-4. **ControllerDetails_tE Registration** — RE found the struct is 84 bytes, ready_flag at offset 0x3c must be 1, set by QueueFetchingControllerDetails at 0x01092820. Fields come from controller object offsets 0x84-0xd4. Product ID 0x1303 is in the recognized range (0x1302-0x1305).
+1. **Fix Controller Registration (PRIMARY BLOCKER)** — This blocks ALL functionality (input, gyro, trackpads, haptics). `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" 10+ times. The controller opens, reserves XInput slot, starts polling, then becomes zombie within 6 seconds. 44 registration attempts, 412 zombie disconnections since Jun 24. **Root cause**: `CGetControllerInfoWorkItem` reads controller details from the IPC pipe but the read fails — likely because our ATT server's responses don't match the expected format, or the IPC pipe isn't set up correctly. Need to trace what `CGetControllerInfoWorkItem::RunFunc` reads and what format it expects.
+2. **SET_SETTINGS 0x09 Retry Loop is NOISE (confirmed)** — The feature report is never sent because `[r15+0x208]` is 0 (test mode flag). SDL3 confirms SET_SETTINGS is fire-and-forget. The 3-second retry is the state machine re-processing failed entries. This does NOT block registration.
+3. **SET_SETTINGS Verification Read Never Happens (by design)** — SDL3 confirms: no `SDL_hid_get_feature_report()` after `SDL_hid_send_feature_report()`. The state machine at 0x010d466b skips VERIFY because r13 is NULL. This is correct behavior, not a bug.
+4. **Command 0xf2 Response Format** — RE found it's a per-category capability query dispatched via switch/case. Tried returning capabilities bitmask (0x4169bfff) — didn't break the loop. Need real SC2 capture.
+5. **ControllerDetails_tE Registration** — RE found the struct is 84 bytes, ready_flag at offset 0x3c must be 1, set by QueueFetchingControllerDetails at 0x01092820. Fields come from controller object offsets 0x84-0xd4. Product ID 0x1303 is in the recognized range (0x1302-0x1305).
 
 ### Files You Must Read Before Making Changes
 
