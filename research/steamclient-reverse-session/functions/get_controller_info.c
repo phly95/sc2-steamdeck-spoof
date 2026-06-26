@@ -1,0 +1,230 @@
+/*
+ * CGetControllerInfoWorkItem::RunFunc — Complete Analysis
+ *
+ * Binary: ~/.steam/debian-installation/linux64/steamclient.so
+ * Function VA: 0x010a3800
+ * Source: /data/src/clientdll/controller.cpp
+ * Status: DETERMINED
+ */
+
+/*
+ * === EXECUTIVE SUMMARY ===
+ *
+ * CGetControllerInfoWorkItem::RunFunc reads a FEATURE REPORT RESPONSE
+ * from the controller via IPC pipe (CHIDMessageToRemote.DeviceRead).
+ *
+ * It sends a DeviceRead request over the named pipe "hiddevicepipesteam",
+ * then waits for a CHIDMessageFromRemote.RequestResponse containing the
+ * HID data. The read uses vtable+0x28 on the controller object.
+ *
+ * "Read failure" occurs when:
+ *   1. The pipe read returns 0 bytes (pipe closed/broken)
+ *   2. The response never arrives (timeout ~20 seconds)
+ *   3. The response has wrong request_id or error result
+ *
+ * The function retries up to 51 times with 100ms sleeps between attempts.
+ */
+
+/*
+ * === PROTOBUF MESSAGE FORMAT ===
+ *
+ * REQUEST (CHIDMessageToRemote):
+ *   field 1: request_id (uint32)
+ *   field 5: device_read = {
+ *     field 1: device (uint32)     — device handle
+ *     field 2: length (uint32)     — bytes to read (40)
+ *     field 3: timeout_ms (int32)  — read timeout
+ *   }
+ *
+ * RESPONSE (CHIDMessageFromRemote):
+ *   field 2: response = {
+ *     field 1: request_id (uint32) — must match request
+ *     field 2: result (int32)      — 0 = success
+ *     field 3: data (bytes)        — HID report data (40 bytes)
+ *   }
+ *
+ * The response is deserialized from the pipe and validated:
+ *   - request_id must match
+ *   - result must be 0
+ *   - data must contain valid HID report
+ */
+
+/*
+ * === DISASSEMBLY (0x010a3800) ===
+ *
+ * rdi = this (CGetControllerInfoWorkItem*)
+ * rsi = controller (IController* with vtable)
+ *
+ * 0x010a3800: push rbx/rbp/r12-r15
+ * 0x010a380e: test rsi, rsi           ; if (controller == NULL) return
+ * 0x010a3811: je 0x10a38b3
+ *
+ * 0x010a3817: lea rax, [0x02c396f0]  ; timeout config value
+ * 0x010a3824: xor r12d, r12d         ; retry_count = 0
+ * 0x010a3834: lea r14, [rbx+0x84]    ; read buffer at this+0x84
+ * 0x010a383b: imul r13, [rax], 0x989680  ; timeout_value * 10,000,000
+ * 0x010a384b: call fcn.026d7e80      ; get current time
+ * 0x010a3850: shr r13, 0x12          ; convert to seconds
+ * 0x010a3854: add r13, rax           ; deadline = current + timeout
+ *
+ * ; === READ LOOP ===
+ * 0x010a3860: mov rax, [rbp]         ; load vtable
+ * 0x010a3864: mov rsi, r14           ; buffer = this+0x84
+ * 0x010a3867: mov rdi, rbp           ; this = controller
+ * 0x010a386a: call [rax+0x28]        ; *** VTABLE CALL: DeviceRead() ***
+ * 0x010a386d: test eax, eax
+ * 0x010a386f: setg [rbx+0x80]       ; success_flag = (return > 0)
+ * 0x010a3876: cmp eax, -1
+ * 0x010a3879: je 0x10a38b3          ; if return == -1, exit (hard error)
+ * 0x010a387b: test eax, eax
+ * 0x010a387d: jle 0x10a38e0         ; if return <= 0, goto SLEEP/RETRY
+ *
+ * ; === SUCCESS PATH (return > 0) ===
+ * 0x010a387f: cmp r12d, 0x32        ; if retry_count == 50
+ * 0x010a3883: jne 0x10a38a5         ;   goto deadline check
+ * 0x010a3885: lea rdx, "too many read failures"
+ * 0x010a3898: call fcn.026cdc00     ; warning/assertion
+ *
+ * ; === DEADLINE CHECK ===
+ * 0x010a38a5: call fcn.026d7e80     ; get current time
+ * 0x010a38aa: cmp r13, rax          ; deadline <= current?
+ * 0x010a38ad: jle 0x10a39b6        ; if expired, goto TIMEOUT
+ * 0x010a38b3: ...                   ; NORMAL EXIT
+ *
+ * ; === SLEEP / RETRY PATH ===
+ * 0x010a38e0: mov edi, 0x64         ; sleep = 100ms
+ * 0x010a38e5: add r12d, 1          ; retry_count++
+ * 0x010a38e9: call Sleep(100ms)
+ * 0x010a3944: lea rax, "Read failure.\n"
+ * 0x010a3967: call LogMsg
+ * 0x010a396c: cmp r12d, 0x33       ; if retry_count == 51
+ * 0x010a3970: je 0x10a3885        ;   goto "too many failures"
+ * 0x010a3976: cmp [rbx+0x80], 0   ; was previous read successful?
+ * 0x010a397d: jne 0x10a38a5       ; if yes, exit (keep result)
+ * 0x010a399a: call fcn.026d7e80   ; get current time
+ * 0x010a399f: cmp r13, rax        ; deadline expired?
+ * 0x010a39a2: jg 0x10a3860        ; no → RETRY LOOP
+ *                                 ; yes → fall through to TIMEOUT
+ *
+ * ; === TIMEOUT PATH ===
+ * 0x010a39b6: lea rax, "timeout"
+ * 0x010a3a32: jmp 0x10a38b3       ; exit
+ */
+
+/*
+ * === KEY CONSTANTS ===
+ *
+ * Vtable offset for Read:     0x28 (slot 5)
+ * Retry count limit:          51 (0x33)
+ * Warning threshold:          50 (0x32)
+ * Sleep between retries:      100ms (0x64)
+ * Read buffer offset:         this+0x84
+ * Success flag offset:        this+0x80
+ * Timeout config address:     0x02c396f0
+ * Timeout value:              ~20 seconds (computed via magic number division)
+ */
+
+/*
+ * === SUCCESS VS FAILURE ===
+ *
+ * On SUCCESS (read returns > 0):
+ *   - byte [this+0x80] = 1 (success flag)
+ *   - Data read into buffer at this+0x84
+ *   - Function returns normally
+ *
+ * On FAILURE (read returns 0 or negative, not -1):
+ *   - Increment retry counter
+ *   - Sleep 100ms
+ *   - Log "Read failure.\n"
+ *   - If previous read was successful (this+0x80 == 1), exit early
+ *   - Otherwise retry up to 51 times or until deadline
+ *
+ * On HARD ERROR (read returns -1):
+ *   - Immediate exit via je 0x10a38b3
+ *   - No retry
+ *
+ * On TIMEOUT (deadline exceeded):
+ *   - Log "timeout"
+ *   - Exit
+ *
+ * On TOO MANY FAILURES (51 retries):
+ *   - Log "too many read failures" via assertion
+ *   - Exit
+ */
+
+/*
+ * === WHAT CAUSES "READ FAILURE" ===
+ *
+ * The vtable+0x28 call sends a CHIDMessageToRemote.DeviceRead request
+ * over the IPC pipe and waits for a CHIDMessageFromRemote.RequestResponse.
+ *
+ * "Read failure" occurs when:
+ *
+ * 1. PIPE BROKEN: The named pipe "hiddevicepipesteam" is closed or broken.
+ *    The read syscall returns 0 bytes or error.
+ *
+ * 2. NO RESPONSE: The remote side (SDL HID daemon) never sends a response.
+ *    This happens if:
+ *    - The controller is not connected
+ *    - The SDL HID daemon is not running
+ *    - The controller doesn't support the requested read
+ *
+ * 3. WRONG RESPONSE: The response has wrong request_id or error result.
+ *    The code checks request_id matching and result == 0.
+ *
+ * 4. TIMEOUT: No response within ~20 seconds. The deadline is computed
+ *    from the timeout config value at 0x02c396f0.
+ *
+ * In the user's case (SC2 BLE), the likely cause is:
+ *   - The BLE controller doesn't respond to DeviceRead requests
+ *   - The IPC pipe to the SDL HID daemon is not established
+ *   - The controller firmware doesn't support the feature report query
+ */
+
+/*
+ * === IPC PIPE MECHANISM ===
+ *
+ * Source: /data/src/common/hiddevicepipesteam.cpp (string at 0x00c8ce80)
+ *
+ * The IPC uses named pipe "hiddevicepipesteam" with protobuf messages:
+ *
+ * REQUEST (CHIDMessageToRemote):
+ *   field 1: request_id (uint32)
+ *   field 5: device_read = {
+ *     field 1: device (uint32)
+ *     field 2: length (uint32)
+ *     field 3: timeout_ms (int32)
+ *   }
+ *
+ * RESPONSE (CHIDMessageFromRemote):
+ *   field 2: response = {
+ *     field 1: request_id (uint32)
+ *     field 2: result (int32)
+ *     field 3: data (bytes)
+ *   }
+ *
+ * The read loop:
+ *   1. Serialize CHIDMessageToRemote with DeviceRead command
+ *   2. Write to named pipe
+ *   3. Wait for response (with timeout)
+ *   4. Deserialize CHIDMessageFromRemote
+ *   5. Validate request_id and result
+ *   6. Copy data to buffer at this+0x84
+ */
+
+/*
+ * === BINARY REFERENCES ===
+ *
+ * Function VA:               0x010a3800
+ * RTTI type name:            0x00aa1a60 ("26CGetControllerInfoWorkItem")
+ * RTTI type info:            0x0008dac0
+ * "Read failure" string:     0x00d22f30
+ * "too many read failures":  0x00d052c8
+ * "timeout" string:          0x00d12f48
+ * "GetControllerInfo failed": 0x00c8f560
+ * Timeout config:            0x02c396f0
+ * IPC pipe source:           0x00c8ce80 (hiddevicepipesteam.cpp)
+ * CHIDMessageToRemote:       0x00b3ead7
+ * DeviceRead tag:            0x00b3fb42
+ * RequestResponse tag:       0x00b3fba8
+ */

@@ -1,0 +1,158 @@
+/*
+ * BYieldingRegisterSteamController — Registration Requirements
+ *
+ * Binary: ~/.steam/debian-installation/linux64/steamclient.so
+ * Function VA: 0x10b3a60
+ * Status: DETERMINED
+ */
+
+/*
+ * === EXECUTIVE SUMMARY ===
+ *
+ * BYieldingRegisterSteamController requires:
+ *   1. Valid controller ID
+ *   2. GetControllerInfo success (via 0x1070620)
+ *   3. Controller must not change during registration
+ *   4. AccountHardware.RegisterSteamController#1 RPC must succeed
+ *   5. AccountHardware.CompleteSteamControllerRegistration#1 RPC must succeed
+ *   6. Must not timeout
+ *   7. Controller must not disconnect
+ *
+ * CGetControllerInfoWorkItem failure does NOT block registration.
+ * It only affects account queries (falls back to local cache).
+ */
+
+/*
+ * === REGISTRATION FLOW ===
+ *
+ * 1. BYieldingRegisterSteamController (0x10b3a60)
+ *    - Entry: push rbp; sub $0x2c8, rsp
+ *    - Calls 0x1070620 to get controller identity
+ *    - If identity fails → "couldn't get identity before registration"
+ *    - Calls AccountHardware.RegisterSteamController#1 via vtable[0x28]
+ *    - If RPC fails → "Error committing registration"
+ *
+ * 2. BYieldingCompleteSteamControllerRegistration
+ *    - Calls AccountHardware.CompleteSteamControllerRegistration#1
+ *    - If fails → "Error committing registration completion"
+ *
+ * 3. BYieldingQueryAccountsRegisteredToController (0x108cf00)
+ *    - Queries accounts registered to controller
+ *    - If IPC query fails → "Error querying accounts... Will Try Local Cache!"
+ *    - Falls back to local cache
+ */
+
+/*
+ * === DISASSEMBLY (0x10b3a60) ===
+ *
+ * 0x10b3a60: push rbp
+ * 0x10b3a61: mov rbp, rsp
+ * 0x10b3a64: push r15/r14/r13/r12/rbx
+ * 0x10b3a73: sub rsp, 0x2c8
+ *
+ * ; Check controller ID
+ * 0x10b3320: test controller_id, controller_id
+ * 0x10b3383: lea rax, "BYieldingRegisterSteamController - missing controller id"
+ * 0x10b3396: ... (log and return error)
+ *
+ * ; Get controller identity
+ * 0x10b3ba5: call 0x1070620         ; GetControllerInfo
+ * 0x10b3bb1: test al, al
+ * 0x10b3bb3: je 0x10b3ee8          ; if failed → error path
+ *
+ * ; Check controller version/state
+ * 0x10b37ad: cmp version, version  ; controller changed?
+ * 0x10b37b9: jne 0x10b3483         ; → "controller changed before registration"
+ *
+ * ; Call RegisterSteamController API
+ * 0x10b3d3a: call [rax+0x28]       ; AccountHardware.RegisterSteamController#1
+ * 0x10b3d51: test al, al
+ * 0x10b3d53: jne 0x10b3f80         ; if succeeded → check version, commit
+ *
+ * ; Error paths
+ * 0x10b3483: lea rax, "controller changed before registration"
+ * 0x10b351b: lea rax, "couldn't get identity before registration"
+ * 0x10b3863: lea rax, "Error committing registration of controller & account pair - controller disconnected."
+ * 0x10b38d9: lea rax, "Error committing registration of controller & account pair: %s"
+ * 0x10b3944: lea rax, "BYieldingRegisterSteamController - timed out"
+ */
+
+/*
+ * === DATA REQUIRED FOR REGISTRATION ===
+ *
+ * 1. VALID CONTROLLER ID
+ *    - Must be non-zero
+ *    - Missing ID → immediate error
+ *
+ * 2. CONTROLLER IDENTITY (from 0x1070620)
+ *    - Connection object at [ctx+0x190]
+ *    - Vtable must be valid
+ *    - Connection state must be queryable
+ *    - Returns controller info needed for API call
+ *
+ * 3. CONTROLLER VERSION/STATE
+ *    - Must not change during registration
+ *    - Checked at 0x10b37ad
+ *    - Mismatch → "controller changed before registration"
+ *
+ * 4. ACCOUNT HARDWARE API ACCESS
+ *    - vtable[0x28] must be callable
+ *    - AccountHardware.RegisterSteamController#1 must be reachable
+ *    - AccountHardware.CompleteSteamControllerRegistration#1 must be reachable
+ *
+ * 5. NETWORK CONNECTIVITY
+ *    - RPC calls must succeed
+ *    - Timeout if server unreachable
+ */
+
+/*
+ * === IS CGetControllerInfoWorkItem REQUIRED? ===
+ *
+ * NO. CGetControllerInfoWorkItem is for the QUERY path, not registration.
+ *
+ * The registration path uses:
+ *   - 0x1070620 (GetControllerInfo) for identity
+ *   - AccountHardware.RegisterSteamController#1 for registration
+ *
+ * The query path uses:
+ *   - CGetControllerInfoWorkItem for account queries
+ *   - Falls back to local cache on failure
+ *
+ * So CGetControllerInfoWorkItem failure means:
+ *   - Account queries fail → local cache used
+ *   - Registration can still succeed
+ *   - Controller can still be used
+ */
+
+/*
+ * === ERROR STRINGS ===
+ *
+ * 0x00ca0b50: "BYieldingRegisterSteamController - missing controller id"
+ * 0x00cce280: "BYieldingRegisterSteamController"
+ * 0x00cd4dc0: "BYieldingRegisterSteamController - couldn't get identity before registration."
+ * 0x00cf82b8: "BYieldingRegisterSteamController - Error committing registration of controller & account pair - controller disconnected."
+ * 0x00d56bf0: "BYieldingRegisterSteamController - controller changed before registration."
+ * 0x00d58300: "BYieldingRegisterSteamController - Error committing registration of controller & account pair: %s"
+ * 0x00d62d30: "BYieldingRegisterSteamController - timed out"
+ * 0x00d66aa8: "BYieldingRegisterSteamController - controller disconnected while waiting."
+ * 0x00d88ff0: "BYieldingRegisterSteamController - Error querying accounts registered to controller. Will Try Local Cache!"
+ *
+ * 0x00d17710: "BYieldingCompleteSteamControllerRegistration - controller changed before completing registration."
+ * 0x00d263d0: "BYieldingCompleteSteamControllerRegistration - couldn't get controller identity."
+ * 0x00d17e00: "BYieldingCompleteSteamControllerRegistration - Error committing registration completion of controller & account pair: %s %s %s"
+ * 0x00cc65d8: "BYieldingCompleteSteamControllerRegistration - Error committing registration completion of controller & account pair - controller disconnected: %s"
+ *
+ * 0x00d41760: "AccountHardware.RegisterSteamController#1"
+ * 0x00ce2dc8: "AccountHardware.CompleteSteamControllerRegistration#1"
+ */
+
+/*
+ * === BINARY REFERENCES ===
+ *
+ * Function VA:               0x10b3a60
+ * GetControllerInfo call:    0x10b3ba5 → 0x1070620
+ * RegisterSteamController:   0x10b3d3a (vtable[0x28])
+ * CompleteRegistration:      0x10b3d4e
+ * QueryAccounts:             0x108cf00
+ * QueryAccounts IPC call:    0x108d01c (vtable[0x218])
+ */

@@ -1,0 +1,154 @@
+/*
+ * Verify Branch Analysis — What Prevents VERIFY for SET_SETTINGS?
+ *
+ * Binary: ~/.steam/debian-installation/linux64/steamclient.so
+ * Status: DETERMINED
+ */
+
+/*
+ * === EXECUTIVE SUMMARY ===
+ *
+ * The VERIFY step (vtable[0x130] = get_feature_report) is prevented
+ * by the NULL check at 0x010d4e6c:
+ *
+ *   0x010d4e6c: test r13, r13
+ *   0x010d4e6f: je 0x10d4ff1       ; skip verify if r13==NULL
+ *
+ * For SET_SETTINGS: r13 is NULL → verify SKIPPED
+ * For GET_ATTRIBUTES: r13 is non-NULL → verify HAPPENS
+ *
+ * The state machine is command-agnostic. The difference is not in
+ * the state machine itself, but in what the CALLER passes as r13.
+ */
+
+/*
+ * === THE TWO PATHS ===
+ *
+ * PATH A: With verify object (r13 != NULL) — used by GET_ATTRIBUTES
+ *
+ *   0x010d4e6c: test r13, r13          ; r13 != NULL
+ *   0x010d4e6f: je 0x10d4ff1           ; NOT taken
+ *   0x010d4e75: mov rax, [r13]         ; load vtable
+ *   0x010d4e79: mov rdi, r13           ; this = r13
+ *   0x010d4e7c: mov esi, [r15+0x198]   ; report ID
+ *   0x010d4e83: call [rax+0x130]        ; VERIFY (get_feature_report)
+ *   0x010d4e89: ...                     ; process result
+ *
+ * PATH B: Without verify object (r13 == NULL) — used by SET_SETTINGS
+ *
+ *   0x010d4e6c: test r13, r13          ; r13 == NULL
+ *   0x010d4e6f: je 0x10d4ff1           ; TAKEN → skip verify
+ *   ...
+ *   0x010d4ff1: pxor xmm0, xmm0       ; timing calc
+ *   0x010d4ff5: cvtsi2ss xmm0, [r15+0x198]
+ *   0x010d4ffe: jmp 0x10d4e91          ; go to timing calc
+ */
+
+/*
+ * === WHY r13 IS NULL FOR SET_SETTINGS ===
+ *
+ * The state machine function signature:
+ *
+ *   void ProcessSettings(
+ *       ControllerSettings* r15,     // settings state
+ *       void* r13,                   // verify object (NULL for SET_SETTINGS)
+ *       ...
+ *   );
+ *
+ * The caller passes NULL as r13 when:
+ *   - The command doesn't require verification (SET_SETTINGS)
+ *   - The verify object hasn't been created yet
+ *   - The caller explicitly wants to skip verification
+ *
+ * For GET_ATTRIBUTES:
+ *   - A verify object is created to hold the response data
+ *   - r13 points to this object
+ *   - After vtable[0x130] returns, the response is in the object
+ *
+ * For SET_SETTINGS:
+ *   - No verify object is needed (fire-and-forget)
+ *   - r13 is NULL
+ *   - The verify step is skipped
+ */
+
+/*
+ * === THE COMPARISON PATH (0x010d4fd0) ===
+ *
+ * When [r15+0x208]==0 (normal operation):
+ *
+ *   0x010d4fd0: mov rdx, [r15+0xc0]       ; settings buffer
+ *   0x010d4fd7: movzx r12d, byte [rdx+rbx] ; read setting byte
+ *   0x010d4fdc: cmp r12b, al               ; compare with [r15+0xe1]
+ *   0x010d4fdf: jne 0x10d4dc6              ; mismatch → send
+ *   0x010d4fe5: xor r12d, r12d             ; match → r12=0
+ *   0x010d4feb: jne 0x10d4e75              ; if callback, call verify
+ *
+ * This path compares a byte from the settings buffer with the
+ * current state byte. If they match, it means the setting was
+ * already applied, so no send is needed. If they differ, a send
+ * is triggered.
+ *
+ * But this comparison is NOT the SET_SETTINGS verification.
+ * It's a "does this setting need to be sent?" check.
+ */
+
+/*
+ * === THE [r15+0x208] FLAG ===
+ *
+ * Set to 1 at: 0x0156781c (YieldingRunTestProgram initialization)
+ * Cleared at: 0x0119f3b1 (after calling vtable[0x228])
+ *
+ * In normal operation, [r15+0x208] is ALWAYS 0.
+ * The flag is only set during test/initialization sequences.
+ *
+ * When [r15+0x208]==0:
+ *   - The comparison path (0x10d4fd0) is used
+ *   - Settings are compared with current state before sending
+ *   - Verify happens only if r13 != NULL
+ *
+ * When [r15+0x208]!=0:
+ *   - The always-send path is used (dead code path)
+ *   - All settings are sent regardless of current state
+ */
+
+/*
+ * === WHY SET_SETTINGS RETRIES EVERY 3 SECONDS ===
+ *
+ * The retry is NOT because verification fails.
+ * The retry is because:
+ *
+ * 1. SET_SETTINGS is fire-and-forget (no verification)
+ * 2. If the HID write fails (vtable[0x10] returns error), the
+ *    setting entry remains in the settings array
+ * 3. The state machine re-processes the array periodically
+ * 4. The 3-second interval is the state machine's polling period
+ * 5. Each iteration, the failed setting is retried
+ *
+ * The "retry" is actually the state machine's normal operation:
+ * it keeps trying to send until the HID write succeeds.
+ */
+
+/*
+ * === KEY DIFFERENCE: SET_SETTINGS vs GET_ATTRIBUTES ===
+ *
+ *                    SET_SETTINGS (0x87)    GET_ATTRIBUTES (0x83)
+ * Command byte       [r15+0xe0] = 0x87      [r15+0xe0] = 0x83
+ * Verify object      r13 = NULL             r13 = non-NULL
+ * VERIFY step        SKIPPED                HAPPENS
+ * Response handling  None                   Data in verify object
+ * Retry on failure   Yes (periodic)         Yes (periodic)
+ * Protocol           Fire-and-forget        Request-response
+ */
+
+/*
+ * === BINARY REFERENCES ===
+ *
+ * Critical branch (test r13): 0x010d4e6c
+ * Skip verify target: 0x010d4ff1
+ * Verify call: 0x010d4e83 (vtable[0x130])
+ * Send call: 0x010d4e14 (vtable[0x10])
+ * Comparison path: 0x010d4fd0
+ * Pending flag check: 0x010d4da0
+ * [r15+0x208] set: 0x0156781c
+ * [r15+0x208] cleared: 0x0119f3b1
+ */

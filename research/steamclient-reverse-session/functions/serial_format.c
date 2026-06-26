@@ -1,0 +1,143 @@
+/*
+ * Serial Format Analysis — What Steam Accepts
+ *
+ * ============================================================
+ * FUNCTION AT 0x26b1ac0: V_strncmp (strtools.cpp)
+ * ============================================================
+ *
+ * Prototype: int V_strncmp(const char* s1, const char* s2, size_t count)
+ * 
+ * ABI: rdi=s1, rsi=s2, rdx=count
+ * Returns: 0 if equal (up to count bytes), -1 if s1<s2, +1 if s1>s2
+ *
+ * ============================================================
+ * CALL SITE AT 0x10c29b3
+ * ============================================================
+ *
+ * Arguments:
+ *   rdi = [rbp-0x17d]   → serial string (first byte after 0xAE/0x15/0x01 header)
+ *   rsi = 0xd69c60       → pattern string (UTF-16LE "FH_cz~...")
+ *   rdx = 1              → count = 1 BYTE
+ *
+ * With count=1, V_strncmp compares exactly ONE byte:
+ *   serial[0] vs pattern[0]
+ *
+ * pattern[0] = 0x46 = 'F'
+ *
+ * Result:
+ *   serial[0] == 'F' → return 0 → PASSES validation
+ *   serial[0] != 'F' → return non-zero → FAILS validation
+ *
+ * ============================================================
+ * WHY OUR SERIAL FAILS
+ * ============================================================
+ *
+ * Our serial: "28de-1303-2efea7d"
+ * serial[0] = '2' = 0x32
+ * Expected:  'F' = 0x46
+ * 0x32 != 0x46 → FAILS
+ *
+ * ============================================================
+ * WHAT HAPPENS ON FAILURE
+ * ============================================================
+ *
+ * When V_strncmp fails (jne at 0x10c29be → 0x10c20a3):
+ *
+ *   lea rdi, [r14+0x3d]      ; dest = controller_info + offset 0x3d
+ *   lea rsi, "DOCKED_SLOT"   ; source = fallback string
+ *   mov edx, 0x14             ; 20 bytes
+ *   call V_strncpy            ; copies "DOCKED_SLOT" as the serial
+ *
+ * The serial in the controller info struct becomes "DOCKED_SLOT".
+ *
+ * ============================================================
+ * WHAT HAPPENS ON SUCCESS
+ * ============================================================
+ *
+ * When V_strncmp passes (0x10c29c4):
+ *
+ *   mov edx, 0x14             ; 20 bytes
+ *   mov rsi, r12              ; source = serial data from response
+ *   call V_strncpy            ; copies the actual serial to controller_info+0x3d
+ *
+ * The actual serial from the GET_SERIAL response is preserved.
+ *
+ * ============================================================
+ * FUNCTION AT 0x26b2800: V_strncpy (strtools.cpp)
+ * ============================================================
+ *
+ * Prototype: char* V_strncpy(char* dest, const char* src, size_t maxLen)
+ *
+ * Copies src to dest byte-by-byte, stopping at:
+ *   - Null terminator in src
+ *   - maxLen reached
+ * Then null-terminates dest.
+ *
+ * At call site 0x10c29cc: maxLen = 0x14 (20 bytes)
+ * At call site 0x10c20af: maxLen = 0x14 (20 bytes)
+ *
+ * ============================================================
+ * SERIAL FORMAT TO USE
+ * ============================================================
+ *
+ * REQUIREMENT: Serial must start with 'F' (0x46).
+ * LENGTH: Up to 20 bytes (null-terminated string).
+ *
+ * Recommended format: "FBTW1-XXXXXXXX-XXXX" (exactly 20 chars)
+ *
+ * Breakdown:
+ *   'F'        = Valve hardware serial prefix (passes V_strncmp)
+ *   'BTW1'     = Bluetooth type indicator
+ *   '-'        = separator
+ *   'XXXXXXXX' = 8-char hex unique ID  
+ *   '-'        = separator
+ *   'XXXX'     = 4-char hex suffix
+ *
+ * Example serial: "FBTW1-AABBCCDD-1234"
+ *
+ * This matches the format of real SC2 BLE controller serials.
+ * Real controllers use Valve-assigned serial numbers that all
+ * start with 'F' (the Valve manufacturing prefix).
+ *
+ * ============================================================
+ * THE "Invalid or missing" LOG MESSAGE
+ * ============================================================
+ *
+ * The log "Invalid or missing unit serial number SC2DECK001,
+ * setting to '28de-1303-2efea7d'" comes from a SEPARATE
+ * validation in CGetControllerInfoWorkItem::RunFunc.
+ *
+ * This runs AFTER the GET_SERIAL handler. It checks the
+ * serial stored in the controller info struct (at offset 0x3d).
+ *
+ * Flow:
+ *   1. GET_SERIAL handler validates serial[0] == 'F' via V_strncmp
+ *   2. If fails → serial = "DOCKED_SLOT"  
+ *   3. If passes → serial = actual serial from device
+ *   4. Controller info registered with Steam
+ *   5. CGetControllerInfoWorkItem reads controller details
+ *   6. If serial is invalid (empty, "DOCKED_SLOT", etc.)
+ *      → generates fallback "28de-1303-XXXXXXXX"
+ *
+ * The fallback format "28de-1303-XXXXXXXX":
+ *   28de = VID 0x28DE (Valve) in little-endian
+ *   1303 = PID 0x1303 (SC2 BLE) in little-endian  
+ *   XXXXXXXX = hash of controller Bluetooth address
+ *
+ * ============================================================
+ * SUMMARY
+ * ============================================================
+ *
+ * The validation function at 0x26b1ac0 (V_strncmp) compares
+ * only the FIRST BYTE of the serial against 'F'.
+ *
+ * Our serial fails because serial[0] = '2', not 'F'.
+ *
+ * Fix: Change serial to start with 'F'. Use format:
+ *   "FBTW1-XXXXXXXX-XXXX" (20 chars)
+ *
+ * The V_strncmp check is the first gate. After passing it,
+ * the serial is copied to the controller info struct. Then
+ * CGetControllerInfoWorkItem performs a second validation.
+ * A well-formatted serial starting with 'F' should pass both.
+ */
