@@ -225,6 +225,86 @@ class HoGPeripheral:
                 print(f"[+] Registering haptic callback on {label} handle 0x{handle:04x}")
                 self.gatt_db.write_callbacks[handle] = lambda value, h=handle: self._on_haptic_write(h, value)
 
+    def _prepopulate_responses(self):
+        """Pre-populate FR 0x00 responses for GATT discovery reads.
+        
+        BlueZ's hog-lib.c sends ATT Read Requests for Feature Report 0x00
+        during GATT discovery, BEFORE Steam sends any SET_REPORT commands.
+        These reads happen at connection time. If we don't have responses
+        ready, the reads return zeros and the identity slot is never populated.
+        
+        We pre-generate all the responses that Steam's initial handshake
+        expects, so when GATT discovery reads FR 0x00, we return valid data.
+        """
+        import struct
+
+        # Response 1: GET_ATTRIBUTES (0x83) — 62 bytes
+        get_attributes = bytearray([
+            0x83,       # command echo
+            0x2d,       # attribute byte count (45 = 9 × 5)
+            # Attribute: ATTRIB_PRODUCT_ID (tag=1) = 0x1303
+            0x01, 0x03, 0x13, 0x00, 0x00,
+            # Attribute: ATTRIB_CAPABILITIES (tag=2) = 0x4169bfff
+            0x02, 0xff, 0xbf, 0x69, 0x41,
+            # Attribute: ATTRIB_BOOTLOADER_BUILD_TIME (tag=10)
+            0x0a, 0x2b, 0x12, 0xa9, 0x62,
+            # Attribute: ATTRIB_FIRMWARE_BUILD_TIME (tag=4)
+            0x04, 0xad, 0xf1, 0xe4, 0x65,
+            # Attribute: ATTRIB_BOARD_REVISION (tag=9) = 46
+            0x09, 0x2e, 0x00, 0x00, 0x00,
+            # Attribute: ATTRIB_CONNECTION_INTERVAL_IN_US (tag=11) = 4000
+            0x0b, 0xa0, 0x0f, 0x00, 0x00,
+            # Extended attributes (tags 13, 12, 14) = 0
+            0x0d, 0x00, 0x00, 0x00, 0x00,
+            0x0c, 0x00, 0x00, 0x00, 0x00,
+            0x0e, 0x00, 0x00, 0x00, 0x00,
+            # Zero padding to 62 bytes
+        ])
+        get_attributes += bytearray(62 - len(get_attributes))
+
+        # Response 2: 0xf2 category 1 — capabilities
+        xf2_cat1 = bytearray([
+            0xf2,       # command echo
+            0x01,       # category
+            0x04,       # length = 4 bytes
+            0xff, 0xbf, 0x69, 0x41,  # capabilities bitmask (LE)
+        ])
+        xf2_cat1 += bytearray(62 - len(xf2_cat1))
+
+        # Response 3: GET_SERIAL (0xAE) — 23 bytes
+        # First byte MUST be 'F' (0x46) to pass validation at 0x26b1ac0
+        serial = b'F0000-0000-00000000'  # 19 chars + null = 20 bytes
+        get_serial = bytearray([
+            0xAE,       # command echo
+            0x15,       # payload length (matches write command byte[1])
+            0x01,       # success status
+        ])
+        get_serial += serial[:20].ljust(20, b'\x00')
+
+        # Response 4: 0xf2 category 2 — settings
+        xf2_cat2 = bytearray([
+            0xf2,       # command echo
+            0x02,       # category
+            0x00,       # num registers (empty)
+        ])
+        xf2_cat2 += bytearray(62 - len(xf2_cat2))
+
+        # Store all responses — when BlueZ reads FR 0x00 during GATT discovery,
+        # it will get the FIRST pending response (GET_ATTRIBUTES).
+        # When Steam reads FR 0x00 after writing commands, it will get
+        # the appropriate response.
+        self._pending_fr_response[0x00] = bytes(get_attributes)
+
+        # Also store in a queue for sequential reads
+        self._fr_response_queue = [
+            bytes(get_attributes),
+            bytes(xf2_cat1),
+            bytes(get_serial),
+            bytes(xf2_cat2),
+        ]
+
+        print(f"[+] Pre-populated FR 0x00 responses for GATT discovery")
+
     def _on_haptic_write(self, handle, value):
         """Handle writes to the SC2 output report characteristic.
 
@@ -295,23 +375,30 @@ class HoGPeripheral:
         """Called when the host reads a Feature Report from the GATT database.
         
         For FR 0x00 and 0x01 (SC2 command channels), return the pending
-        synthetic response from the last command write. For other FRs,
-        proxy to Neptune if available.
+        synthetic response. For GATT discovery reads (before any writes),
+        use the pre-populated response queue. For other FRs, proxy to Neptune.
         """
         import time, traceback
         ts = time.strftime('%H:%M:%S')
         print(f"[DIAG] [{ts}] 📤 FR 0x{report_id:02x} READ called — pending keys: {list(self._pending_fr_response.keys())}")
-        traceback.print_stack(limit=5)
 
         # SC2 command channels — return synthetic response
         if report_id in (0x00, 0x01):
+            # First check if there's a pending response from a write command
             response = self._pending_fr_response.pop(report_id, None)
             if response:
-                print(f"[DIAG] [{ts}] 📤 FR 0x{report_id:02x} READ → returning synthetic response: {response[:20].hex()}...")
+                print(f"[DIAG] [{ts}] 📤 FR 0x{report_id:02x} READ → returning write response: {response[:20].hex()}...")
                 return response
-            else:
-                print(f"[DIAG] [{ts}] 📤 FR 0x{report_id:02x} READ → no pending response, returning zeros")
-                return b'\x00' * 64
+            
+            # If no pending write response, use the pre-populated queue
+            # (for GATT discovery reads before any writes)
+            if hasattr(self, '_fr_response_queue') and self._fr_response_queue:
+                response = self._fr_response_queue.pop(0)
+                print(f"[DIAG] [{ts}] 📤 FR 0x{report_id:02x} READ → returning queued response: {response[:20].hex()}...")
+                return response
+            
+            print(f"[DIAG] [{ts}] 📤 FR 0x{report_id:02x} READ → no pending response, returning zeros")
+            return b'\x00' * 64
 
         # Other Feature Reports — proxy to Neptune hardware
         return self._proxy_feature_read(report_id)
@@ -414,16 +501,21 @@ class HoGPeripheral:
             print(f"[DIAG] 🎮 → Responding to GET_ATTRIBUTES with synthetic SC2 device info")
 
         elif cmd == self.SC2_CMD_GET_SERIAL:
-            # GET_SERIAL / GetStringAttribute (0xAE) — Real device response from InputPlumber.
-            # Format: [cmd_echo, length, type, serial_ascii..., padding]
-            serial = b'SC2DECK001'
+            # GET_SERIAL (0xAE) — Response format (23 bytes total):
+            #   byte[0] = 0xAE (command echo)
+            #   byte[1] = 0x15 (payload length — MUST match write command's byte[1])
+            #   byte[2] = 0x01 (success status)
+            #   bytes[3-22] = serial number (20 bytes, ASCII, null-padded)
+            # Write command from Steam: [0xAE, 0x15, 0x01, 0x00 × 20] (23 bytes)
+            # Read response must also be 23 bytes.
+            # Validation at 0x26b1ac0 (V_strncmp) checks first byte == 'F' (0x46).
+            serial = b'F0000-0000-00000000'  # Must start with 'F' to pass validation
             response = bytearray([
-                0xAE,       # header.type = GetStringAttribute
-                0x14,       # header.length = 20 (serial data length)
-                0x01,       # string type
+                0xAE,       # command echo
+                0x15,       # payload length (0x15 = 21, matches write command byte[1])
+                0x01,       # success status
             ])
-            response += serial
-            response += bytearray(64 - len(response))  # pad to 64
+            response += serial[:20].ljust(20, b'\x00')  # pad serial to 20 bytes
             print(f"[DIAG] 🎮 → Responding to GET_SERIAL with '{serial.decode()}'")
 
         elif cmd == self.SC2_CMD_GET_CHIP_ID:
@@ -622,6 +714,8 @@ class HoGPeripheral:
 
     def _on_att_connection(self, addr):
         print(f"[+] ATT connection established from {addr}")
+        self._pending_fr_response.clear()
+        self._prepopulate_responses()
 
     def _on_cccd_enabled(self, handle):
         """Called when a CCCD is enabled for an input report."""

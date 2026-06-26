@@ -159,6 +159,8 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 
 **The pattern**: Spawn an actor with a specific question, get a concise answer back, act on it. Don't do the investigation yourself.
 
+> **📖 See `docs/actor-prompt-guide.md`** for templates and examples of how to formulate actor prompts. Read it before spawning any actor. It covers RE/binary analysis, deploy/test, and source code analysis prompts with correct structure, stop conditions, and parallelism rules.
+
 ### Principle 2: Batch SSH Operations
 
 **Bad** (fills context with 10+ SSH round-trips):
