@@ -67,7 +67,7 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 
 ### Current Status
 
-**⚠️ NOTE: The current version does NOT have working input.** The controller connects, Steam detects it, but registration fails because `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" and the controller becomes zombie within 6 seconds. See "What Needs to Happen Next" for details.
+**⚠️ NOTE: The current version does NOT have working input.** The controller connects, Steam detects it, but registration fails because the identity slot at `controller+slot*0xe8+0x200` is never populated before the zombie timer fires. Both root issues are PRE-EXISTING (confirmed by testing old commit `1b6bfde`).
 
 **✅ Working (End-to-End):**
 - Raw L2CAP ATT server accepts connections on CID 4.
@@ -90,18 +90,19 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 - **CHR_REPORT SC2 Custom in HID Service** — Report IDs 0x45 (45-byte) and 0x47 (47-byte) in HID Service for hog-ll subscription. Dual notification targets: Valve Custom Service + HID Service CHR_REPORT.
 - **Haptic forwarding code ready** — `_on_haptic_write()` handler on handle 0x0019 correctly parses both 10-byte (with Report ID) and 9-byte (stripped) haptic payloads and forwards to Neptune. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets. The issue is upstream in Steam/hog-ll.
 
-**❌ Not Working:**
-- **Controller registration fails** — `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" 10+ times, controller becomes zombie within 6 seconds of opening. 44 registration attempts, 412 zombie disconnections since Jun 24.
+**❌ Not Working (Both PRE-EXISTING):**
+- **Zombie disconnect** — Identity slot at `controller+slot*0xe8+0x200` never populated before zombie timer fires (~10s). Feature report WRITE commands arrive ~150s after connection. Controller becomes zombie within 10 seconds of opening. 44 registration attempts, 412 zombie disconnections since Jun 24.
+- **Encryption error** — `set_report_cb() Error: Encryption Key Size is insufficient` persists even without BT_SECURITY_MEDIUM. BlueZ HOG profile internal issue — SET_REPORT fails, blocking feature report handshake. Confirmed pre-existing (tested old commit `1b6bfde`).
 - **Input not reaching Steam** — controller registers briefly then dies. No stable input.
-- **SET_SETTINGS 0x09 retry loop** — confirmed to be **noise** (not a blocker). The feature report is never sent because `[r15+0x208]` is 0 (test mode flag). SDL3 confirms SET_SETTINGS is fire-and-forget.
 
 ### What Needs to Happen Next
 
-1. **Fix Controller Registration (PRIMARY BLOCKER)** — This blocks ALL functionality (input, gyro, trackpads, haptics). `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" 10+ times. The controller opens, reserves XInput slot, starts polling, then becomes zombie within 6 seconds. 44 registration attempts, 412 zombie disconnections since Jun 24. **Root cause**: `CGetControllerInfoWorkItem` reads controller details from the IPC pipe but the read fails — likely because our ATT server's responses don't match the expected format, or the IPC pipe isn't set up correctly. Need to trace what `CGetControllerInfoWorkItem::RunFunc` reads and what format it expects.
-2. **SET_SETTINGS 0x09 Retry Loop is NOISE (confirmed)** — The feature report is never sent because `[r15+0x208]` is 0 (test mode flag). SDL3 confirms SET_SETTINGS is fire-and-forget. The 3-second retry is the state machine re-processing failed entries. This does NOT block registration.
-3. **SET_SETTINGS Verification Read Never Happens (by design)** — SDL3 confirms: no `SDL_hid_get_feature_report()` after `SDL_hid_send_feature_report()`. The state machine at 0x010d466b skips VERIFY because r13 is NULL. This is correct behavior, not a bug.
-4. **Command 0xf2 Response Format** — RE found it's a per-category capability query dispatched via switch/case. Tried returning capabilities bitmask (0x4169bfff) — didn't break the loop. Need real SC2 capture.
-5. **ControllerDetails_tE Registration** — RE found the struct is 84 bytes, ready_flag at offset 0x3c must be 1, set by QueueFetchingControllerDetails at 0x01092820. Fields come from controller object offsets 0x84-0xd4. Product ID 0x1303 is in the recognized range (0x1302-0x1305).
+1. **Fix Zombie Disconnect (PRIMARY BLOCKER)** — The identity slot at `controller+slot*0xe8+0x200` must be populated before the zombie timer fires (~10s). Feature report WRITE commands arrive ~150s after connection — too late. Need to either:
+   - Find a way to populate the identity slot without Steam's feature report writes
+   - Make the zombie timer fire later
+   - Find an alternative code path to populate the identity slot
+2. **Fix Encryption Error** — `set_report_cb() Error: Encryption Key Size is insufficient` blocks SET_REPORT. This is a BlueZ HOG profile internal issue. May require BlueZ source modification or a workaround (e.g., different security level, or bypassing BlueZ's HOG entirely).
+3. **GET_SERIAL Format** — FIXED: byte[1] changed from 0x14 to 0x15 (matches write command). Serial must start with 'F' (0x46) to pass V_strncmp validation at 0x26b1ac0.
 
 ### Files You Must Read Before Making Changes
 

@@ -74,15 +74,17 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 
 ## 3. What Needs to be Done
 
-### 1. Fix Controller Registration (PRIMARY BLOCKER)
-- **Status**: This blocks ALL functionality (input, gyro, trackpads, haptics). `CGetControllerInfoWorkItem::RunFunc` gets "Read failure" 10+ times. The controller opens, reserves XInput slot, starts polling, then becomes zombie within 6 seconds. 44 registration attempts, 412 zombie disconnections since Jun 24.
-- **CONFIRMED (2026-06-26)**: The SET_SETTINGS 0x09 retry loop is **noise** (not a blocker):
-  - SDL3 confirms: SET_SETTINGS is fire-and-forget (no `SDL_hid_get_feature_report()` after send)
-  - State machine at 0x010d466b skips VERIFY because r13 is NULL (by design)
-  - `[r15+0x208]` is a "test mode" flag — always 0 in normal operation, so vtable dispatch is SKIPPED
-  - SET_SETTINGS runs in CHIDIOThread (worker thread), registration runs on main thread — they don't block each other
-  - Deferred notification fix tested — did NOT fix the issue
-- **Root cause**: `CGetControllerInfoWorkItem` reads controller details from the IPC pipe but the read fails. Likely because our ATT server's responses don't match the expected format, or the IPC pipe isn't set up correctly.
+### 1. Fix Zombie Disconnect (PRIMARY BLOCKER)
+- **Status**: The identity slot at `controller+slot*0xe8+0x200` must be populated before the zombie timer fires (~10s). Feature report WRITE commands arrive ~150s after connection — too late. Controller becomes zombie within 10 seconds of opening. 44 registration attempts, 412 zombie disconnections since Jun 24.
+- **CONFIRMED PRE-EXISTING (2026-06-26)**: Tested old commit `1b6bfde` (yesterday 6:51 PM) — same zombie disconnect. Both root issues existed before our changes.
+- **Root cause chain**:
+  1. BLE connection → GATT discovery → reads FR 0x00 → returns zeros (no pending response)
+  2. BlueZ creates UHID device → Steam opens controller → starts feature report processing
+  3. Feature report WRITE commands arrive ~150s after connection (too late)
+  4. Zombie timer fires at ~10s → identity slot empty → DISCONNECT
+  5. Identity slot populated by feature report processing code at 0x10d4e6c
+  6. Feature report processing requires UHID device + Steam's HID API calls
+  7. Race condition: zombie timer fires before feature report processing completes
 - **Steam controller log shows**:
   ```
   CGetControllerInfoWorkItem::RunFunc: Read failure. (×10)
@@ -92,14 +94,42 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
   !! Steam controller device opened for index 0
   Steam Controller reserving XInput slot 0
   Controller PollState Changed from 0 to 1
-  Disconnecting zombie controller 0  (6 seconds later)
+  Disconnecting zombie controller 0  (6-13 seconds later)
   ```
+- **RE findings**:
+  - `0x1070620` is a 7-check gate function (zombie check + registration identity)
+  - Checks: bounds, vtable, connection exists, connection state (1 or 4), **slot ready flag at slot+0x200**
+  - Identity slot populated by `QueueFetchingControllerDetails` at 0x1092820
+  - Serial validation at 0x26b1ac0 (V_strncmp) checks first byte == 'F' (0x46)
+  - `CGetControllerInfoWorkItem` failure does NOT block registration (separate code path)
 - **What to try next**:
-  1. Trace `CGetControllerInfoWorkItem::RunFunc` in the binary to find what it reads and what format it expects
-  2. Check if our GET_ATTRIBUTES/0xf2/GET_SERIAL responses match the expected IPC message format
-  3. Verify the IPC pipe is set up correctly (hiddevicepipesteam.cpp at 0x00c8ce9a)
+  1. Find a way to populate the identity slot without waiting for Steam's feature report writes
+  2. Investigate why feature report WRITE commands are delayed ~150s
+  3. Consider bypassing the zombie check (e.g., manipulating connection state)
 
-### 3. Haptic Feedback (HOST NOT SENDING)
+### 2. Fix Encryption Error (SECONDARY BLOCKER)
+- **Status**: `set_report_cb() Error: Encryption Key Size is insufficient` blocks SET_REPORT. This is a BlueZ HOG profile internal issue — not caused by our code. Confirmed PRE-EXISTING (tested old commit `1b6bfde`).
+- **What we tried**:
+  - Removed `BT_SECURITY_MEDIUM` from att_server.py — error persists
+  - Tested old version — same error
+- **Impact**: SET_REPORT fails → feature report handshake can't complete → identity slot never populated
+- **What to try next**:
+  1. Investigate BlueZ's HOG profile encryption requirements
+  2. Consider bypassing BlueZ's HOG entirely (custom uhid driver?)
+  3. Check if the error is actually blocking SET_REPORT or just a warning
+
+### 3. GET_SERIAL Format (FIXED)
+- **Status**: FIXED in current commit. byte[1] changed from 0x14 to 0x15 (matches write command). Serial must start with 'F' (0x46) to pass V_strncmp validation at 0x26b1ac0.
+- **Validation**: `V_strncmp` at 0x26b1ac0 compares first byte of serial against pattern at 0xd69c60 (first byte = 0x46 = 'F'). If validation fails, serial is replaced with "DOCKED_SLOT".
+- **Response format** (23 bytes):
+  ```
+  byte[0] = 0xAE (command echo)
+  byte[1] = 0x15 (payload length, matches write command byte[1])
+  byte[2] = 0x01 (success status)
+  bytes[3-22] = serial number (20 bytes, starts with 'F')
+  ```
+
+### 4. Haptic Feedback (HOST NOT SENDING)
 - **Status**: The haptic forwarding code is ready and correct — `_on_haptic_write()` on handle 0x0019 parses both 10-byte and 9-byte payloads. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets during a test session. The issue is upstream in Steam/hog-ll.
 - **RE findings**: Haptics use `SDL_hid_write()` (output reports, NOT feature reports). Lizard mode must be OFF for haptics to work.
 - **Note**: The SET_SETTINGS 0x09 retry loop is confirmed to be noise (not a blocker). It does not affect haptics.
@@ -131,12 +161,26 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 - **Product ID check**: 0x1303 is in recognized range (0x1302-0x1305). Other recognized types: 0x1142, 0x1220, 0x1201-0x1206, 0x1101-0x1102.
 - **Haptic path**: Uses SDL_hid_write() (output reports), NOT SDL_hid_send_feature_report(). Report ID 0x80, 10 bytes. Lizard mode must be OFF for haptics to work.
 - **SET_SETTINGS is fire-and-forget**: SDL3 confirms no `SDL_hid_get_feature_report()` after send. State machine at 0x010d466b skips VERIFY because r13 is NULL. `[r15+0x208]` is a "test mode" flag — always 0 in normal operation.
-- **CGetControllerInfoWorkItem**: Reads controller details from IPC pipe. Fails with "Read failure" — this is the actual registration blocker. RTTI at unknown address (needs tracing).
+- **0x1070620 is the zombie check / registration identity gate**: 7-check gate function. Checks bounds, vtable, connection state (1 or 4), and **slot ready flag at controller+slot*0xe8+0x200**. Same function used by both zombie check and registration.
+- **Identity slot populated by feature report processing**: Code at 0x10d4e6c processes GET_ATTRIBUTES/GET_SERIAL/0xf2 responses and writes to identity slot. Unique ID at slot+0x200 is the serial number — first byte MUST be non-zero.
+- **Serial validation**: V_strncmp at 0x26b1ac0 checks first byte == 'F' (0x46). Pattern at 0xd69c60.
+- **CGetControllerInfoWorkItem**: Reads controller details from IPC pipe (hiddevicepipesteam.cpp). Retries 51 times with 100ms sleep. Fails because IPC pipe read returns 0 bytes. Does NOT block registration — only affects account queries.
 - **CHIDIOThread**: Processes HID I/O work items. String at 0x00d6fbc2. SET_SETTINGS work items are queued here.
-- **IPC pipe**: hiddevicepipesteam.cpp (string at 0x00c8ce9a). Connects steamclient.so to CHIDIOThread.
+- **IPC pipe**: hiddevicepipesteam.cpp (string at 0x00c8ce9a). Connects steamclient.so to CHIDIOThread. Uses protobuf messages (CHIDMessageToRemote/CHIDMessageFromRemote).
 - **SDL_hid_send_feature_report**: Resolved via dlsym at 0x01760fa2, stored at 0x02c69a28.
-- **0xf2 command**: Per-category capability query dispatched via switch/case. Exact response format unknown.
+- **0xf2 command**: Per-category capability query dispatched via switch/case. Response format: `[0xf2, category, length, data...]`.
+- **Encryption error**: `set_report_cb() Error: Encryption Key Size is insufficient` is PRE-EXISTING. Persists without BT_SECURITY_MEDIUM. BlueZ HOG profile internal issue.
 - **RE session files**: ~/steamclient-reverse-session/ contains findings.md, functions/, notes/
+  - `functions/controller_identity_check.c` — 0x1070620 disassembly (7-check gate)
+  - `functions/registration_data_flow.c` — What data registration needs from ATT server
+  - `functions/zombie_disconnect.c` — Zombie check conditions (state-based, not timer)
+  - `functions/serial_validation.c` — V_strncmp validation (first byte == 'F')
+  - `functions/serial_format.c` — Serial number format requirements
+  - `functions/slot_data_population.c` — Identity slot vs ControllerDetails analysis
+  - `functions/get_attributes_format.c` — GET_ATTRIBUTES response format
+  - `functions/get_serial_format.c` — GET_SERIAL response format (byte[1]=0x15)
+  - `functions/notification_trigger.c` — Why ATT notifications won't trigger feature report processing
+  - `functions/ipc_pipe_fix.c` — IPC pipe analysis (populates ControllerDetails, not identity slot)
   - `functions/handshake_completion.c` — SET_SETTINGS retry is noise, registration runs independently
   - `functions/hid_write_failure.c` — vtable[0x10] skipped because [r15+0x208]=0
   - `functions/retry_mechanism.c` — 3-second retry for failed HID writes
