@@ -48,13 +48,16 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 ## 2. What is Working
 - **Raw L2CAP ATT Server (CID 4)**: Bypasses the SteamOS BlueZ GATT listener socket binding bug.
 - **Just Works Pairing**: Auto-confirm via D-Bus `Agent1`.
-- **GATT Database (74 attributes, 6 services)**: GAP, GATT, HID (0x1812) with CHR_REPORT for SC2 Custom + Haptic Output, Valve Custom HID Service, Battery, Device Information.
+- **GATT Database (85 attributes, 6 services)**: GAP, GATT, HID (0x1812) with CHR_REPORT for SC2 Custom + Haptic Output, Valve Custom HID Service, Battery, Device Information.
 - **PnP ID**: USB-IF source (0x02), Valve VID (0x28DE), PID (0x1303).
 - **Physical Deck Input Capture**: Reads Neptune controller `/dev/hidraw3` (64-byte HID reports).
 - **Neptune Auto-Recovery**: Reopens hidraw on crash (2s delay, 10 retries).
 - **45-byte SC2 Custom Reports**: Full Triton 32-bit button bitmask (verified from SDL3 `TritonButtons` enum), analog sticks, triggers, trackpads, IMU, force sensors. Sent on CHR_REPORT handles 0x0033 and 0x003c.
 - **Standard HID Gamepad Reports**: 12-byte reports on handle `0x0012` with buttons, analog sticks (Y axis corrected), triggers. Host creates `/dev/input/eventN`.
 - **Lizard Mode Mouse/Keyboard**: Relative mouse (right trackpad) and keyboard reports on handles `0x0019`/`0x001d`.
+- **Trackpads work** — Left/right trackpad X/Y data flows in 45-byte reports.
+- **Gyro works** — IMU accelerometer and gyroscope data flows in 45-byte reports.
+- **Back buttons work** — L4/L5/R4/R5 paddle data flows in button bitmask.
 - **Synthetic SC2 Command Handler**: Feature Report 0x00 intercepts SC2 commands:
   - `0x83` GET_ATTRIBUTES - responds with synthetic device info (capabilities bitmask 0x4169bfff)
   - `0xAE` GET_SERIAL - responds with serial number
@@ -62,7 +65,8 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
   - `0x87` SET_SETTINGS - acknowledges, stores register values
   - `0x89` GET_SETTINGS_VALUES - returns stored register values
   - `0x81` CLEAR_MAPPINGS - acknowledges
-  - `0x85` SET_DEFAULT_DIGITAL_MAPPINGS - handles mode switch
+  - `0x85` SET_DEFAULT_DIGITAL_MAPPINGS - acknowledges
+  - `0x8D` SET_CONTROLLER_MODE - mode switch (lizard ↔ Steam Input)
   - Unknown commands echoed with zero payload
 - **Haptic forwarding code ready** — `_on_haptic_write()` handler on handle 0x0019 correctly parses both 10-byte (with Report ID) and 9-byte (stripped) haptic payloads and forwards to Neptune. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets. The issue is upstream in Steam/hog-ll.
 - **Feature Report Proxy to Neptune**: Non-SC2 Feature Reports proxied to Neptune hardware via `ioctl`.
@@ -94,7 +98,18 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 ### 2. ~~Fix Encryption Error~~ RESOLVED (2026-06-26)
 - **Status**: Cleared after host PC reboot. Same root cause as zombie disconnect — stale BlueZ state.
 
-### 3. ATT Server Spec Compliance (MEDIUM PRIORITY)
+### 3. Haptics (PRIMARY REMAINING ISSUE)
+- **Status**: Host never sends haptic output reports (btmon confirmed zero ATT Write Command 0x52 packets). The haptic forwarding code is ready — `_on_haptic_write()` on handle 0x0019 correctly parses both 10-byte and 9-byte payloads and forwards to Neptune.
+- **What's known**:
+  - Haptics use `SDL_hid_write()` (output reports, NOT feature reports). Report ID 0x80, 10 bytes.
+  - Lizard mode must be OFF for haptics to work.
+  - `btusb` kernel module reset does NOT fix this — stale state is in BlueZ user-space.
+- **What to try**:
+  1. Investigate why Steam's haptic code path isn't triggered — may require specific controller state or register values
+  2. Get a real SC2 btmon capture to see if haptics work on a real device
+  3. Check if SET_SETTINGS 0x09 retry is a prerequisite for haptics
+
+### 4. ATT Server Spec Compliance (LOW PRIORITY)
 - **Status**: Registration works without these fixes. These are correctness improvements that could prevent issues with different host stacks or future BlueZ versions.
 - **Items (implement one at a time, test each)**:
   1. **Read Blob error code** (`att_server.py:379`) — Returns `ATT_ERR_INVALID_HANDLE` (0x01) when offset >= value length. Should be `ATT_ERR_INVALID_OFFSET` (0x07).
@@ -103,8 +118,8 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
   4. **ATT permission checking** — No `ATT_PROP_READ`/`ATT_PROP_WRITE` flag checking on Read/Write Request handlers. **DO NOT check permissions on Write Command** — Feature Report 0x00 has `ATT_PROP_WRITE` but not `ATT_PROP_WRITE_NO_RSP`.
   5. **Diagnostic handle labels** (`att_server.py:504-510, 525-531`) — Stale hardcoded handles for Mouse, Keyboard, SC2 Custom CH1/CH2. Only Gamepad (0x0012) is correct.
 
-### 4. SC2 Custom Reports (0x003c) — CCCD Not Always Enabled (HIGH PRIORITY)
-- **Status**: CCCD on handle 0x003c not always written by BlueZ hog-ll after reconnect. Host sees generic gamepad instead of full SC2. This blocks trackpads, gyro, haptics, back buttons.
+### 5. SC2 Custom Reports (0x003c) — CCCD Not Always Enabled (MEDIUM PRIORITY)
+- **Status**: CCCD on handle 0x003c not always written by BlueZ hog-ll after reconnect. Host sees generic gamepad instead of full SC2. Trackpads, gyro, and back buttons still work (data flows on 0x0033).
 - **What to try**:
   1. Investigate why hog-ll sometimes skips 0x003c CCCD write
   2. Check if dual notification targets (Valve Custom Service + HID Service CHR_REPORT) cause confusion

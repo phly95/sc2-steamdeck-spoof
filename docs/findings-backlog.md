@@ -8,6 +8,9 @@
 
 No zombie disconnects, no errors. `BYieldingCompleteSteamControllerRegistration` completed. `CPulseHapticWorkItem` being created. Controller fully activated.
 
+**Working**: Gamepad, trackpads, gyro, back buttons, standard HID input.
+**Not working**: Haptics only (host never sends haptic output reports).
+
 ---
 
 ## High Severity

@@ -82,11 +82,17 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 - Input handler maps Neptune buttons → SC2 12-byte report format (Y axis inverted correctly).
 - **Standard HID gamepad reports flow** — Host detects generic gamepad via KDE Game Controller and Steam Controller Settings.
 - **45-byte SC2 Custom reports flow** — Host receives Report ID 0x45 reports via `/dev/hidrawN`, verified via hexdump.
+- **Trackpads work** — Left/right trackpad X/Y data flows in 45-byte reports.
+- **Gyro works** — IMU accelerometer and gyroscope data flows in 45-byte reports.
+- **Back buttons work** — L4/L5/R4/R5 paddle data flows in button bitmask.
 - Connection stable for 5+ minutes (use `connect` not `pair`). Clear stale bonding keys after Deck BT restart.
 - **Synthetic SC2 Command Handler** — Feature Report 0x00 (SC2 command channel) intercepted locally. Handles GET_ATTRIBUTES, GET_SERIAL, CLEAR_MAPPINGS, SET_ATTRIBUTES, SET_MODE with synthetic SC2 device info responses matching real device byte layout.
 - **Neptune Auto-Recovery** — Input handler retries opening hidraw device on crash (2s delay, 10 retries).
 - **CHR_REPORT SC2 Custom in HID Service** — Report IDs 0x45 (45-byte) and 0x47 (47-byte) in HID Service for hog-ll subscription. Dual notification targets: Valve Custom Service + HID Service CHR_REPORT.
 - **Haptic forwarding code ready** — `_on_haptic_write()` handler on handle 0x0019 correctly parses both 10-byte (with Report ID) and 9-byte (stripped) haptic payloads and forwards to Neptune. However, **the host never sends haptic output reports** — btmon capture confirmed zero ATT Write Command (0x52) packets. The issue is upstream in Steam/hog-ll.
+
+**❌ Not Working:**
+- **Haptics** — Host never sends haptic output reports (btmon confirmed zero 0x52 packets). Blocked by stable SC2 registration path — Steam's haptic code path may require specific controller state that isn't reached yet.
 
 **~~❌ Not Working (Both PRE-EXISTING)~~ — RESOLVED (2026-06-26):**
 - **~~Zombie disconnect~~** — Caused by stale BlueZ state, not code. After host PC reboot or clearing bond data + restarting BlueZ daemon, registration completes and input flows.
