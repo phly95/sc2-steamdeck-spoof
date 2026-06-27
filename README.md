@@ -1,4 +1,4 @@
-# Steam Deck → Steam Controller 2026 BLE Spoof
+# SpoofDeck: Steam Deck → Steam Controller 2026 BLE Spoof
 
 Make a Steam Deck present itself as a Steam Controller 2026 over Bluetooth Low Energy, enabling Steam Input support (trackpads, gyro, back buttons) without USB wired mode.
 
