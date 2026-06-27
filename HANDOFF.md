@@ -109,7 +109,8 @@ We present the **Steam Deck** as a **Steam Controller 2026 (SC2 / Triton)** over
 - **Trigger chain**: SDL3's `HIDAPI_DriverSteamTriton_UpdateDevice()` polls every 6ms. If `low_frequency_rumble || high_frequency_rumble` is non-zero and 40ms has passed, it calls `SDL_hid_write()`. Rumble is resent every 40ms while non-zero.
 - **Root cause**: The game isn't calling `SDL_RumbleJoystick()` with non-zero values. SDL3 never reaches the `SDL_hid_write()` call. This is likely a registration/state issue — Steam doesn't think it needs to send haptics.
 - **SET_SETTINGS 0x09 loop**: If Steam thinks lizard mode is ON, haptics are blocked. The loop retries every 3 seconds but never gets a proper response.
-- **6 haptic report types**: 0x80 (rumble), 0x81 (pulse), 0x82 (command), 0x83 (LFO tone), 0x84 (log sweep), 0x85 (script). Only 0x80 is used for game rumble.
+- **6 haptic report types**: 0x80 (rumble), 0x81 (pulse), 0x82 (command), 0x83 (LFO tone), 0x84 (log sweep), 0x85 (script). Only 0x80 is used by games via `SDL_RumbleJoystick()`.
+- **SC2 → Neptune translation**: Simple — `left_speed → left_intensity`, `right_speed → right_intensity`, period=0. Translation code already in `main_l2cap.py:281-289`. Neptune has dual ERM motors (basic rumble) vs SC2's dual LRA (precision haptics) — fidelity loss but functional for game rumble.
 - **`set_report_cb()` error**: BlueZ tries writing output reports before encryption is established (error 0x0C). Transient, not blocking.
 - **What to try**:
   1. Investigate why Steam's haptic code path isn't triggered — may require specific controller state or register values

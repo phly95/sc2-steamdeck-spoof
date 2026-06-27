@@ -88,6 +88,26 @@ HIDAPI_DriverSteamTriton_UpdateDevice() [every 6ms]:
 - Writing directly to `/dev/hidrawN` on host — would test if forwarding path works
 - Investigating specific controller state/register values needed for haptics
 
+### SC2 → Neptune Haptic Translation
+
+**Key insight**: Games only use SC2 report 0x80 (rumble) via `SDL_RumbleJoystick()`. The other 5 types (pulse, command, LFO tone, log sweep, script) are never sent by games.
+
+**Translation** (already implemented in `main_l2cap.py:281-289`):
+```
+SC2 0x80: [0x80, type(1), intensity(2 LE), left_speed(2 LE), left_gain(1), right_speed(2 LE), right_gain(1)]  — 10 bytes
+Neptune:  [0x80, left_intensity(2 LE), left_period(2 LE), right_intensity(2 LE), right_period(2 LE)]          — 9 bytes
+
+left_speed → left_intensity, right_speed → right_intensity, period=0
+```
+
+**Limitations**:
+- Gain has no Neptune equivalent (ignored)
+- Period field unused (hardcoded 0)
+- SC2 LRA precision haptics → Neptune ERM basic rumble (fidelity loss)
+- 5 of 6 SC2 haptic types unsupported — but games never use them
+
+**Status**: Translation code ready. Host never sends 0x80 output reports (btmon confirmed zero 0x52 packets). Blocked upstream — Steam doesn't call `SDL_RumbleJoystick()`.
+
 ---
 
 ## High Severity
