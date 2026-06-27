@@ -13,6 +13,83 @@ No zombie disconnects, no errors. `BYieldingCompleteSteamControllerRegistration`
 
 ---
 
+## Haptics Deep Dive
+
+### Transport
+- Haptics use `SDL_hid_write()` (output reports), NOT `SDL_hid_send_feature_report()`.
+- Report ID 0x80, 10 bytes total.
+- Path: steamclient.so → protobuf IPC → bluetoothd → ATT Write Command (0x52) → BLE
+
+### SC2 Haptic Format (Report ID 0x80)
+```
+Byte 0:   0x80 (report ID)
+Byte 1:   type (uint8) — 0 = HAPTIC_TYPE_OFF
+Byte 2-3: intensity (uint16 LE)
+Byte 4-5: left.speed (uint16 LE) — low_frequency_rumble
+Byte 6:   left.gain (int8) — 0
+Byte 7-8: right.speed (uint16 LE) — high_frequency_rumble
+Byte 9:   right.gain (int8) — 0
+```
+
+### All 6 Haptic Report Types
+| Report ID | Name | Size | Description |
+|-----------|------|------|-------------|
+| 0x80 | HapticRumble | 10 bytes | Left/right motor speed |
+| 0x81 | HapticPulse | 8 bytes | Pulse on/off/repeat |
+| 0x82 | HapticCommand | 4 bytes | Off/tick/click/tone/rumble/noise/script/sweep |
+| 0x83 | HapticLFOTone | 10 bytes | LFO tone with frequency/duration |
+| 0x84 | HapticLogSweep | 9 bytes | Logarithmic frequency sweep |
+| 0x85 | HapticScript | 4 bytes | Predefined haptic script |
+
+### Trigger Chain (from SDL3)
+```
+Game → SDL_RumbleJoystick(low_freq, high_freq)
+  → ctx->low_frequency_rumble = low_freq
+  → ctx->high_frequency_rumble = high_freq
+
+HIDAPI_DriverSteamTriton_UpdateDevice() [every 6ms]:
+  if ctx->connected && joystick != NULL
+    && (ctx->low_frequency_rumble || ctx->high_frequency_rumble)
+    && (now - ctx->last_rumble_time) >= 40ms:
+      → HIDAPI_DriverSteamTriton_RumbleJoystick()
+      → SDL_hid_write(device, buffer, 10)
+      → ctx->last_rumble_time = now
+```
+
+### Why Haptics Don't Work
+1. **Game never calls `SDL_RumbleJoystick()`** — SDL3 never reaches `SDL_hid_write()`. Root cause: registration/state issue.
+2. **SET_SETTINGS 0x09 loop** — If Steam thinks lizard mode is ON, haptics are blocked.
+3. **`set_report_cb()` error 0x0C** — BlueZ tries writing output reports before encryption is established. Transient.
+
+### Neptune vs SC2 Haptic Format
+- **SC2**: Dual LRA motors, 6 output report types (0x80-0x85)
+- **Neptune**: Dual ERM motors, `[0x80, intensity(2), period(2), intensity(2), period(2)]`
+- Translation is straightforward but host never sends haptics.
+
+### Binary Addresses
+| Function | VA | String Reference |
+|----------|-----|------------------|
+| TriggerHapticPulse | 0x013205a3 | 0x00ab43f0 |
+| ForceSimpleHapticEvent | 0x01322dae | 0x00ab43b0 |
+| CRumbleThread | 0x0111b370 | 0x00aa5b00 |
+| CPulseHapticWorkItem | RTTI at 0x00aa28e2 | — |
+| SDL_hid_write | dlsym at 0x01760ff5 | — |
+| SDL_hid_send_feature_report | dlsym at 0x01760fa2 | — |
+
+### What's Been Tried
+- Testing haptics with Steam UI (trackpad clicks, start button holds) — no haptics triggered
+- Testing haptics with a game — still no haptics
+- Changing SET_SETTINGS 0x09 response format (3 formats tried) — none broke the loop
+- Adding `BT_SECURITY_MEDIUM` on listening socket — error 0x0C persisted
+- Deferred notification ordering — did NOT fix the issue
+
+### What Hasn't Been Tried
+- Real SC2 btmon capture — would answer all remaining questions in minutes
+- Writing directly to `/dev/hidrawN` on host — would test if forwarding path works
+- Investigating specific controller state/register values needed for haptics
+
+---
+
 ## High Severity
 
 ### 1. Command 0x85 routes to mode switch instead of 0x8D
