@@ -46,11 +46,11 @@ ABS_HAT0X = 16
 ABS_HAT0Y = 17
 
 NEPTUNE_LIZARD_OFF_CMDS = [
-    b'\x01\x00\x81' + b'\x00' * 61,                  # ClearDigitalMappings
-    b'\x01\x00\x87\x03\x08\x07\x00' + b'\x00' * 57,  # RPadMode -> TrackpadMode.None (0x07)
-    b'\x01\x00\x87\x03\x07\x07\x00' + b'\x00' * 57,  # LPadMode -> TrackpadMode.None (0x07)
-    b'\x01\x00\x87\x03\x18\x00\x00' + b'\x00' * 57,  # SmoothAbsoluteMouse -> 0
-    b'\x01\x00\x87\x03\x15\x00\x00' + b'\x00' * 57,  # SensitivityScaleAmount -> 0
+    b'\x81' + b'\x00' * 63,                          # ClearDigitalMappings
+    b'\x87\x03\x08\x07\x00' + b'\x00' * 59,          # RPadMode -> TrackpadMode.None (0x07)
+    b'\x87\x03\x07\x07\x00' + b'\x00' * 59,          # LPadMode -> TrackpadMode.None (0x07)
+    b'\x87\x03\x18\x00\x00' + b'\x00' * 59,          # SmoothAbsoluteMouse -> 0
+    b'\x87\x03\x15\x00\x00' + b'\x00' * 59,          # SensitivityScaleAmount -> 0
 ]
 
 

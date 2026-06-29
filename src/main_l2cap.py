@@ -281,20 +281,21 @@ class HoGPeripheral:
     def _forward_haptic_to_neptune(self, left_speed, right_speed):
         """Forward haptic rumble to the Neptune controller via hidraw output report."""
         try:
-            # Neptune rumble format per hid-steam.c steam_haptic_rumble_cb():
-            # 11-byte vendor command: [0xeb, 0x09, 0x00, 0x00, 0x00, left_lo, left_hi, 0x00, 0x00, 0x02, 0x00]
-            # left/right speed are uint16 LE, clamped to 0-0xFFFF
+            # Neptune rumble format per InputPlumber's PackedRumbleReport:
+            # 64-byte struct: [0xeb, 0x09, 0x00, 0x00, 0x00, left_lo, left_hi, right_lo, right_hi, ...]
             left_i = min(0xFFFF, left_speed)
             right_i = min(0xFFFF, right_speed)
-            report = bytes([
-                0xeb, 0x09,                         # Vendor command ID
-                0x00, 0x00, 0x00,                   # Padding
-                left_i & 0xFF, (left_i >> 8) & 0xFF,  # Strong magnitude (left)
-                0x00, 0x00,                         # Padding
-                0x02,                               # Command type
-                0x00,                               # Padding
-            ])
-            self._write_neptune_output(report)
+            report = bytearray(64)
+            report[0] = 0xeb  # TriggerRumbleCommand
+            report[1] = 0x09  # report_size
+            report[2] = 0x00  # unk_2
+            report[3] = 0x00  # event_type
+            report[4] = 0x00  # intensity
+            report[5] = left_i & 0xFF
+            report[6] = (left_i >> 8) & 0xFF
+            report[7] = right_i & 0xFF
+            report[8] = (right_i >> 8) & 0xFF
+            self._write_neptune_output(bytes(report))
         except Exception as e:
             print(f"[-] Haptic forward error: {e}")
 
@@ -791,6 +792,7 @@ class HoGPeripheral:
 
     def run(self):
         """Run the main event loop."""
+        self._grab_lizard_mode_devices()
         self.mainloop = GLib.MainLoop()
 
         def signal_handler(signum, frame):
@@ -807,8 +809,47 @@ class HoGPeripheral:
         print("[*] Entering main loop. Press Ctrl+C to stop.")
         self.mainloop.run()
 
+    _EVIOCGRAB = 0x40044590
+    _lizard_grab_fds = {}
+
+    def _grab_lizard_mode_devices(self):
+        """Grab Steam Controller mouse/kbd evdev to prevent lizard mode on Deck desktop."""
+        import fcntl, glob as _glob
+        for evpath in sorted(_glob.glob('/dev/input/event*')):
+            try:
+                base = os.path.basename(evpath)
+                name_path = f'/sys/class/input/{base}/device/name'
+                phys_path = f'/sys/class/input/{base}/device/phys'
+                if not os.path.exists(name_path):
+                    continue
+                with open(name_path) as f:
+                    name = f.read().strip()
+                with open(phys_path) as f:
+                    phys = f.read().strip()
+                if 'Valve' in name and ('/input0' in phys or '/input1' in phys):
+                    fd = os.open(evpath, os.O_RDONLY | os.O_NONBLOCK)
+                    fcntl.ioctl(fd, self._EVIOCGRAB, 1)
+                    self._lizard_grab_fds[evpath] = fd
+                    print(f"[+] Grabbed {evpath} ({name}, {phys}) to disable lizard mode")
+            except (OSError, FileNotFoundError):
+                pass
+
+    def _release_lizard_mode_devices(self):
+        """Release grabbed evdev devices."""
+        import fcntl
+        for evpath, fd in self._lizard_grab_fds.items():
+            try:
+                fcntl.ioctl(fd, self._EVIOCGRAB, 0)
+                os.close(fd)
+                print(f"[+] Released {evpath}")
+            except OSError:
+                pass
+        self._lizard_grab_fds.clear()
+
     def cleanup(self):
         """Clean up resources."""
+        self._release_lizard_mode_devices()
+
         if hasattr(self, '_neptune_feature_fd') and self._neptune_feature_fd:
             try:
                 import os
