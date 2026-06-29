@@ -227,12 +227,14 @@ The haptics path is `UHID_OUTPUT` → `forward_report()`, NOT `UHID_SET_REPORT` 
 ### Verified Addresses
 | Address | Function/Label | Status |
 |---------|---------------|--------|
-| `0x015677f4` | YieldingRunTestProgram | **VERIFIED** — string at 0x00d6d17b |
+| `0x015675a8` | Controller message dispatcher (18,300 bytes) | **VERIFIED** — branches on [rdi+0x1d8], state 1-2 vs 3-4 |
+| `0x015677f4` | YieldingRunTestProgram job allocation point | **VERIFIED** — string at 0x00d6d17b, in job.cpp |
 | `0x0156781c` | `mov byte [r15+0x208], 1` | **VERIFIED** — the only write that enables 0x8F |
 | `0x010d4da0` | Gate check: `cmp byte [r15+0x208], 0` | **VERIFIED** |
-| `0x010d4e6c` | Feature report state machine | **VERIFIED** |
-| `0x010d4e14` | vtable[0x10] dispatch | **VERIFIED** |
+| `0x010d4e14` | vtable[0x10] dispatch | **VERIFIED** — trivial setter at 0x017605b0 |
 | `0x026b1ac0` | V_strncmp (serial validation) | **VERIFIED** — count=1, checks byte[0]=='F' |
+
+**Full analysis**: `research/steamclient-reverse-session/functions/yielding_run_test_program.c`
 
 ### Hallucinated Addresses (DO NOT USE)
 | File | Claimed | Actual | Issue |
