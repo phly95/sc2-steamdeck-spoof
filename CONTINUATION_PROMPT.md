@@ -35,57 +35,90 @@ Everything works except haptics. On a **clean connection** (stale state cleared)
 
 The SET_SETTINGS notification hypothesis was **TESTED AND FAILED** (caused ghost inputs). It is NOT the blocker.
 
-The root cause is: **hog-ll never attempts SET_REPORT on the clean connection.** Without SET_REPORT, the output report path is never established and haptic writes from Steam are rejected.
+The root cause is: **hog-ll's `forward_report()` is called but writes are not reaching our ATT server, OR the kernel never generates `UHID_OUTPUT` events.**
 
-## Investigation: Why Doesn't hog-ll Attempt SET_REPORT?
+## Investigation: BlueZ hog-lib.c Analysis (COMPLETED 2026-06-29)
 
-This is the core question. The answer is in BlueZ's hog-lib.c source code.
+BlueZ 5.86 source obtained from kernel.org and analyzed. Key findings:
 
-### Phase 1: Get BlueZ Source
+### Critical Finding: Haptics Path is `UHID_OUTPUT` → `forward_report()`, NOT `UHID_SET_REPORT`
 
-BlueZ 5.86 is on the Deck. Get the source:
-
-```bash
-sshpass -p 'asdf' ssh -o StrictHostKeyChecking=no deck@172.16.16.120 \
-  "echo 'asdf' | sudo -S apt-get source bluez 2>/dev/null || \
-   echo 'asdf' | sudo -S apt-get download bluez 2>/dev/null && \
-   dpkg-deb -x bluez*.deb /tmp/bluez-src/"
+The haptics path when Steam writes to `/dev/hidrawN`:
+```
+Steam → SDL_hid_write() → write("/dev/hidrawN") → kernel hidraw
+  → uhid_hid_output_raw() → UHID_OUTPUT event → BlueZ
+  → forward_report() → find_report_by_rtype() → gatt_write_char/gatt_write_cmd
+  → ATT Write Request (0x12) or Write Command (0x52) → our ATT server
 ```
 
-If that fails, the source is at `/usr/share/doc/bluez/` or download from kernel.org. The key file is `profiles/input/hog-lib.c`.
+**NOT** `UHID_SET_REPORT` → `set_report()`. SET_REPORT is kernel-initiated (device probe), not triggered by Steam writes.
 
-### Phase 2: Understand SET_REPORT Flow (use explore subagent)
+### Key Code References (hog-lib.c)
 
-Spawn an explore subagent to read `hog-lib.c` and answer:
+| Function | Line | Purpose |
+|----------|------|---------|
+| `forward_report()` | 746-778 | Handles UHID_OUTPUT (haptics from Steam) |
+| `set_report()` | 845-900 | Handles UHID_SET_REPORT (kernel-initiated) |
+| `find_report_by_rtype()` | 740 | Finds report by type+ID |
+| `find_report()` | 693-706 | Searches report list, **BUG: uses `hog->flags` instead of `hog->uhid_flags` for numbered flag** |
+| `report_cmp()` | 674-685 | Compares reports, **ignores ID when numbered=false** |
+| `uhid_create()` | 989-1019 | Creates UHID device, registers callbacks |
+| `report_map_read_cb()` | 1054 | Called after Report Map read, triggers uhid_create() |
 
-1. **When does hog-ll call SET_REPORT?** — What triggers it? Is it during initialization or on-demand?
-2. **What conditions must be true before SET_REPORT is attempted?** — Does it need specific Report Map entries, CCCD subscriptions, or other prerequisites?
-3. **What opcode does hog-ll use for SET_REPORT?** — ATT Write Request (0x12) or ATT Write Command (0x52)?
-4. **What handle does it write to?** — The CHR_REPORT handle for the output report (should be 0x0019 for Report ID 0x80)
-5. **What data does it send?** — Report ID + report data? Or something else?
-6. **Does hog-ll skip SET_REPORT for BLE vs USB?** — Is there a code path difference?
-7. **What happens after SET_REPORT succeeds?** — Does it then enable output via uhid? Does it change how SDL_hid_write works?
-8. **Is there a "boot protocol" vs "report protocol" distinction?** — Does hog-ll need to be in a specific mode?
-9. **What does `set_report_cb()` do on success vs failure?** — Does it retry? Does it disable output?
-10. **Is there a HID Control Point interaction?** — Does SET_REPORT require SET_PROTOCOL first?
+### Forward Report Flow (lines 746-778)
 
-Also read `src/shared/uhid.c` to understand:
-- How `bt_uhid_set_report()` works
-- What the uhid device configuration looks like
-- Whether output reports are supported in the uhid setup
-
-### Phase 3: Compare with Real SC2 (if possible)
-
-Check if there's a real SC2 BLE capture available:
-```bash
-ls -la /home/philip/spoofdeck-modified/scratch/
-find /home/philip/ -name "*.btsnoop" -o -name "*.log" 2>/dev/null | head -10
+```c
+forward_report(uhid, user_data):
+  1. ev = bt_uhid_get_event(uhid)           // Get UHID_OUTPUT event
+  2. report = find_report_by_rtype(hog,      // Find matching report
+       HOG_REPORT_TYPE_OUTPUT,
+       ev->u.output.numbered,               // From kernel (false for our device)
+       ev->u.output.id)                     // 0x80
+  3. if (!report) → DBG("Unable to find report") + return  // SILENT DROP
+  4. if (hog->attrib == NULL) → return      // Connection down
+  5. Strip Report ID if numbered
+  6. Write to BLE device:
+     - if properties & GATT_CHR_PROP_WRITE → gatt_write_char() [ATT 0x12]
+     - else if properties & GATT_CHR_PROP_WRITE_WITHOUT_RESP → gatt_write_cmd() [ATT 0x52]
 ```
 
-If a real SC2 capture exists, compare the initialization sequence with our fake device. Look for:
-- Does the real SC2 get SET_REPORT attempts?
-- What's different about the real device's HID descriptor?
-- What handles does the real SC2 use?
+**CRITICAL**: Our CHR_REPORT has BOTH properties (0x0E), so it uses `gatt_write_char()` → **ATT Write Request (0x12)**, NOT Write Command (0x52).
+
+### Previous btmon Filter Was Wrong
+
+The btmon filter looked for 0x52 (Write Command), but `forward_report()` uses 0x12 (Write Request) because our CHR_REPORT has `GATT_CHR_PROP_WRITE`. **We may have missed actual writes!**
+
+### Find Report Bug (line 698-701)
+
+```c
+find_report(hog, type, numbered, id):
+  if (type == HOG_REPORT_TYPE_OUTPUT)
+    numbered = !!(hog->flags & UHID_DEV_NUMBERED_OUTPUT_REPORTS);
+  // hog->flags = 0x02 (HID Info byte 3 = "Normally Connectable")
+  // UHID_DEV_NUMBERED_OUTPUT_REPORTS = 0x02 (bit 1)
+  // Result: numbered = true (COINCIDENCE!)
+```
+
+This bug means `numbered=true` for all output reports, which affects how `report_cmp()` matches (line 677-685).
+
+### Set Report Flow (lines 845-900) — NOT the haptics path
+
+`set_report()` is triggered by kernel HID core, NOT by Steam writes. It handles `UHID_SET_REPORT` events. This is for device configuration (LED states, etc.), not for sending haptic output data.
+
+### Why SET_REPORT Was Blamed
+
+Previous analysis conflated two different things:
+1. `UHID_SET_REPORT` — kernel-initiated, for device configuration
+2. `UHID_OUTPUT` — host-initiated, for sending output data (haptics)
+
+The "output report path" for haptics is `UHID_OUTPUT`, not `UHID_SET_REPORT`. The kernel doesn't need SET_REPORT to succeed before allowing output writes.
+
+### What Needs to Be Tested
+
+1. **Check for ATT Write Request (0x12) to handle 0x0019** in btmon, NOT just 0x52
+2. **Check Deck logs for "Write Request: handle=0x0019"** — the enhanced logging should capture this
+3. **Manually test UHID output path** — write to `/dev/hidrawN` on host, check if write reaches Deck
+4. **If no writes arrive** — the issue is upstream (kernel UHID or BlueZ forward_report not being called)
 
 ### Phase 4: Test Hypotheses
 
@@ -111,17 +144,23 @@ Based on Phase 2 findings, form hypotheses and test them one at a time:
 - Check btmon: `printf 'qwerasdf\n' | sudo -S timeout 10 btmon -t 2>&1 | grep -E "Write|0x52|Error|SET_REPORT"`
 - Check Deck logs: `sshpass -p 'asdf' ssh deck@172.16.16.120 "echo asdf | sudo -S journalctl -u sc2-hogp --since '2 min ago' --no-pager | grep -i 'haptic\|write.*0x0019\|SET_REPORT'"`
 
-### Phase 5: If BlueZ Source Unavailable
+### Phase 5: If No Writes Arrive on handle 0x0019
 
-If you can't get the BlueZ source, investigate from the other end:
+If the enhanced logging shows NO writes to handle 0x0019 (neither 0x12 nor 0x52):
 
-1. **Check HID Control Point handling** — Our `_on_feature_report_write` handler processes SC2 commands on FR 0x00/0x01, but does it handle Control Point writes (handle 0x0010)? If hog-ll writes to the Control Point and we ignore it, SET_REPORT might never be triggered.
+1. **Check if UHID device is created** — `ls -la /dev/hidraw*` on host. If no hidraw device exists, the UHID device was never created.
 
-2. **Check Report Map parsing** — Our Report Map declares 234 bytes. Verify each section is correct by parsing it and comparing with the real SC2 spec.
+2. **Check if Steam writes to /dev/hidrawN** — Use `strace` on Steam or write directly:
+   ```bash
+   sudo bash scripts/test_haptic_write.sh /dev/hidrawN
+   ```
+   If the manual write succeeds but Steam's writes don't, the issue is in Steam's haptic scheduling.
 
-3. **Check if SET_PROTOCOL is needed** — The HID Control Point characteristic (handle 0x0010) accepts SET_PROTOCOL and SET_IDLE commands. If hog-ll sends SET_PROTOCOL and we don't respond, it might skip output.
+3. **Check BlueZ logs** — Look for `forward_report` or `Unable to find report` messages. BlueZ's `DBG()` is usually compiled out, but `error()` messages should appear.
 
-4. **Try forcing SET_REPORT from our side** — As a diagnostic, have our server initiate a fake SET_REPORT by sending a notification that includes output report data. If this triggers hog-ll to establish the output path, we know the issue is initialization order.
+4. **Check kernel UHID logs** — `dmesg | grep -i uhid` for any UHID errors.
+
+5. **Verify Report Map parsing** — BlueZ's hog-lib.c parses the Report Map during GATT discovery. If parsing fails, reports are never added to the list and `find_report_by_rtype()` returns NULL. Check for any parsing errors in BlueZ logs.
 
 ## Important Rules
 
