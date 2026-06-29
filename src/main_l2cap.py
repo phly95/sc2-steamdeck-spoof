@@ -281,12 +281,19 @@ class HoGPeripheral:
     def _forward_haptic_to_neptune(self, left_speed, right_speed):
         """Forward haptic rumble to the Neptune controller via hidraw output report."""
         try:
-            # Neptune rumble format: report ID 0x80 + 8 bytes payload
-            # Based on hid-steam.c steam_play_effect()
-            # Report: [0x80, left_intensity(2 LE), left_period(2 LE), right_intensity(2 LE), right_period(2 LE)]
+            # Neptune rumble format per hid-steam.c steam_haptic_rumble_cb():
+            # 11-byte vendor command: [0xeb, 0x09, 0x00, 0x00, 0x00, left_lo, left_hi, 0x00, 0x00, 0x02, 0x00]
+            # left/right speed are uint16 LE, clamped to 0-0xFFFF
             left_i = min(0xFFFF, left_speed)
             right_i = min(0xFFFF, right_speed)
-            report = struct.pack('<BHHHH', 0x80, left_i, 0, right_i, 0)
+            report = bytes([
+                0xeb, 0x09,                         # Vendor command ID
+                0x00, 0x00, 0x00,                   # Padding
+                left_i & 0xFF, (left_i >> 8) & 0xFF,  # Strong magnitude (left)
+                0x00, 0x00,                         # Padding
+                0x02,                               # Command type
+                0x00,                               # Padding
+            ])
             self._write_neptune_output(report)
         except Exception as e:
             print(f"[-] Haptic forward error: {e}")
@@ -300,9 +307,13 @@ class HoGPeripheral:
         self._ensure_neptune_feature_fd()
         if self._neptune_feature_fd:
             try:
-                os.write(self._neptune_feature_fd, data)
+                written = os.write(self._neptune_feature_fd, data)
+                print(f"[haptic] ✅ Neptune output written: {written} bytes data={data.hex()}")
             except Exception as e:
-                print(f"[-] Neptune output write error: {e}")
+                print(f"[haptic] ❌ Neptune output write error: {e}")
+                self._close_neptune_feature_fd()
+        else:
+            print(f"[haptic] ❌ Neptune fd not available, dropping {len(data)} bytes")
 
     def _on_feature_report_read(self, report_id):
         """Called when the host reads a Feature Report from the GATT database.
