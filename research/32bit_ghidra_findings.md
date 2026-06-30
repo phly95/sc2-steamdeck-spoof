@@ -161,7 +161,7 @@ bt_hog_attach() (hog-lib.c:1720)
 2. **Capture btmon during BLE connection** — Shows the ATT traffic timing: when CCCDs are written, when our first notification arrives, when UHID_START fires. Identifies the timing gap.
 3. **Verify CCCD write + notification flow** — Check if our `_notification_handles` set is populated when CGetControllerInfoWorkItem starts reading. Add logging to confirm CCCD writes arrive on the correct handles.
 4. **Test with pre-sent notifications** — Modify our ATT server to send a burst of notifications immediately on connection (before waiting for Neptune input). This would pre-fill the UHID queue and ensure CGetControllerInfoWorkItem gets data.
-5. **Native SC2 comparison** — Capture btmon + Steam logs with a real SC2 to establish the baseline timing.
+5. **Native SC2 comparison** — Capture btmon + Steam logs with a real SC2 to establish the baseline timing (requires hardware we don't have).
 6. **GDB on host Steam process** — Breakpoint on `CGetControllerInfoWorkItem::RunFunc` (0x01218840) to see what `hid_read` returns and how many retries it takes.
 
 ## Files

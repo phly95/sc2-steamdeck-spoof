@@ -36,7 +36,7 @@ This is the primary HID service UUID for the Steam Controller 2026 BLE profile. 
 hog-ll adds it from the Report Reference descriptor. The notification data is exactly
 45 bytes starting at offset 0 = sequence number.
 
-**Verified against btmon captures from real SC2 device (serial 28de-1303-2efea7d).**
+**Format verified against Steam client binary RE and SDL3 source code.**
 
 ```
 Offset  Size  Description

@@ -456,7 +456,7 @@ class HoGPeripheral:
                 0x2d,       # header.length = 45 (9 attributes x 5 bytes)
                 # Attribute: ATTRIB_PRODUCT_ID (tag=1) = 0x1303 (SC2 BLE PID)
                 0x01, 0x03, 0x13, 0x00, 0x00,
-                # Attribute: ATTRIB_CAPABILITIES (tag=2) = 0x4169bfff (real SC2 value)
+                # Attribute: ATTRIB_CAPABILITIES (tag=2) = 0x4169bfff (from SC2 protocol analysis)
                 # Bits: buttons(0-9), triggers(10-19), joysticks(20-25), trackpads(26-29),
                 #       IMU(30-31), haptics(37), dual trackpads(39)
                 0x02, 0xff, 0xbf, 0x69, 0x41,
@@ -820,7 +820,7 @@ class HoGPeripheral:
                     self.att_server.send_notification(self._sc2_report_handle, gamepad_45b)
                 if self._sc2_hid_handle:
                     self.att_server.send_notification(self._sc2_hid_handle, gamepad_45b)
-        # Lizard mode suppressed — real SC2 doesn't send mouse/keyboard over BLE.
+        # Lizard mode suppressed — SC2 protocol uses Feature Reports + CHR_REPORT for input.
         # Steam's SC2 driver handles everything via Feature Reports + CHR_REPORT.
 
     def run(self):
