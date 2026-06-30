@@ -173,4 +173,4 @@ The SET_SETTINGS notification hypothesis was tested on 2026-06-28 and **failed**
 
 ---
 
-*Last updated: 2026-06-29*
+*Last updated: 2026-06-29 (evening — parallel subagent investigation findings)*

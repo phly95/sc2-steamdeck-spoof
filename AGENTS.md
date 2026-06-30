@@ -119,7 +119,7 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 
 | File | Lines | Why |
 |------|-------|-----|
-| **AGENTS.md** (this file) | 615 | Full project context, architecture, how to run, gotchas, working principles |
+| **AGENTS.md** (this file) | 607 | Full project context, architecture, how to run, gotchas, working principles |
 | `docs/sc2-protocol.md` | 172 | SC2 BLE protocol — PIDs, UUIDs, report formats, button bitmask, mode switching |
 | `docs/att-server-implementation.md` | 134 | ATT opcode table, handle layout, host discovery sequence, CCCD handling |
 | `research/raw-l2cap-viability.md` | 76 | Confirmed working socket setup code, architecture diagram, ATT opcodes |
