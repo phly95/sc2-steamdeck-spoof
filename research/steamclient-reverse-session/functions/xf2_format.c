@@ -119,3 +119,22 @@
  * The 0xf2 responses are likely NOT the blocker for registration.
  * The serial number validation is the more likely blocker.
  */
+
+⚠️ DISCLAIMER: WRONG BINARY ANALYZED
+
+All analysis in this file was performed on the WRONG binary:
+  ~/.steam/debian-installation/linux64/steamclient.so (46MB, 64-bit x86_64)
+
+Steam actually loads:
+  ~/.steam/debian-installation/ubuntu12_32/steamclient.so (49MB, 32-bit i386)
+
+ALL ADDRESSES, FUNCTION OFFSETS, AND DISASSEMBLY ARE WRONG for the running process.
+The conceptual findings (gate mechanism, YieldingRunTestProgram, job system) likely
+apply to both binaries, but every specific address must be re-derived from the
+32-bit binary or verified via GDB on the running process.
+
+Verified: 2026-06-29
+- Steam process: ELF 32-bit LSB pie executable (i386)
+- steamclient.so loaded: ubuntu12_32/steamclient.so
+- YieldingRunTestProgram string: 0x00bfc7e3 (32-bit) vs 0x00d6d17b (64-bit)
+
