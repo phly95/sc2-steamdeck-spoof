@@ -12,15 +12,25 @@
 - **Vendor ID**: 0x28DE (Valve)
 - **PnP ID PID**: 0x0003
 
-## GATT Service UUID
+## GATT Services
+
+### Firmware-Confirmed Layout
+
+The real SC2 firmware (nRF52840, Zephyr RTOS) registers GATT services as follows:
+
+- **HID Service (0x1812)** — Explicitly registered in firmware (`FUN_0001d8d0`). Contains up to 6 input Report characteristics, up to 10 output/feature Report characteristics, and 1 optional custom CHR_REPORT.
+- **GAP (0x1800)** and **GATT (0x1801)** — Pre-registered by Zephyr BLE stack, looked up by firmware.
+- **Battery (0x180F)** and **Device Info (0x180A)** — **NOT found in firmware GATT registration**. Storage keys exist for DIS values (`bt/dis/model`), but no GATT registration code. These may be registered elsewhere or not present in SC2 BLE mode.
+
+**Note**: Our spoofing server exposes Battery and Device Info because BlueZ's HOGP driver requires them for `/dev/hidrawN` creation. The real SC2 may not have them — this is an area for further testing.
+
+### Valve Custom Service
 
 ```
 100F6C32-1735-4313-B402-38567131E5F3
 ```
 
-This is the primary HID service UUID for the Steam Controller 2026 BLE profile. It is NOT the standard HID service (0x1812) — it is a Valve custom UUID.
-
-## Characteristics
+This is a Valve custom UUID service. Steam reads from these characteristics directly.
 
 | Characteristic | UUID | Properties | Description |
 |---------------|------|------------|-------------|
@@ -162,29 +172,55 @@ Key strings from Steam Client:
 
 ## SC2 Command Bytes (Feature Report 0x00)
 
-| Byte | Name | Direction | Description |
-|------|------|-----------|-------------|
-| 0x80 | ID_SET_DIGITAL_MAPPINGS | Host→Device | Set button mappings |
-| 0x81 | ID_CLEAR_DIGITAL_MAPPINGS | Host→Device | Clear mappings (exit lizard mode) |
-| 0x82 | ID_GET_DIGITAL_MAPPINGS | Host→Device | Get current mappings |
-| 0x83 | ID_GET_ATTRIBUTES_VALUES | Bidirectional | Get device attributes |
-| 0x84 | ID_GET_ATTRIBUTE_LABEL | Host→Device | Get attribute label |
-| 0x85 | ID_SET_DEFAULT_DIGITAL_MAPPINGS | Host→Device | Set default mappings (enter gamepad mode) |
-| 0x86 | ID_FACTORY_RESET | Host→Device | Factory reset |
-| 0x87 | ID_SET_SETTINGS_VALUES | Host→Device | Set controller settings |
-| 0x88 | ID_CLEAR_SETTINGS_VALUES | Host→Device | Clear settings |
-| 0x89 | ID_GET_SETTINGS_VALUES | Bidirectional | Get current settings |
-| 0x8A | ID_GET_SETTING_LABEL | Host→Device | Get setting label |
-| 0x8B | ID_GET_SETTINGS_MAXS | Host→Device | Get max values |
-| 0x8C | ID_GET_SETTINGS_DEFAULTS | Host→Device | Get default values |
-| 0x8D | ID_SET_CONTROLLER_MODE | Host→Device | Mode switch (lizard ↔ Steam Input) |
-| 0x8E | ID_LOAD_DEFAULT_SETTINGS | Host→Device | Load default settings |
-| 0x8F | ID_TRIGGER_HAPTIC_PULSE | Host→Device | Trigger haptic pulse |
-| 0x9F | ID_TURN_OFF_CONTROLLER | Host→Device | Turn off controller |
-| 0xA1 | ID_GET_DEVICE_INFO | Host→Device | Get device info |
-| 0xAE | ID_GET_SERIAL | Bidirectional | Get serial number |
-| 0xBA | ID_GET_CHIP_ID | Bidirectional | Get chip ID |
-| 0xF2 | Unknown | Bidirectional | Per-category capability query |
+### Firmware-Confirmed Command Table (100 commands)
+
+The firmware's main command dispatch (`FUN_000383c4` at `0x000383c4`) uses a jump table at `0x00053f94` with **95 entries**. An additional 5 commands are handled outside the main table. **100 total commands** identified from firmware RE.
+
+### Known Commands (handled by our spoofing code)
+
+| Byte | Name | Direction | Description | In Firmware Table |
+|------|------|-----------|-------------|:-----------------:|
+| 0x81 | ID_CLEAR_DIGITAL_MAPPINGS | Host→Device | Clear mappings (exit lizard mode) | Yes |
+| 0x83 | ID_GET_ATTRIBUTES_VALUES | Bidirectional | Get device attributes | Yes |
+| 0x87 | ID_SET_SETTINGS_VALUES | Host→Device | Set controller settings | **No** (gap 0x86-0x8a) |
+| 0x8F | ID_TRIGGER_HAPTIC_PULSE | Host→Device | Trigger haptic pulse | Yes (0x54368) |
+| 0xAE | ID_GET_SERIAL | Bidirectional | Get serial number | **No** (handled at BLE co-processor level) |
+
+### Commands Documented in steamclient.so RE
+
+| Byte | Name | Direction | Description | In Firmware Table |
+|------|------|-----------|-------------|:-----------------:|
+| 0x80 | ID_SET_DIGITAL_MAPPINGS | Host→Device | Set button mappings | Yes |
+| 0x82 | ID_GET_DIGITAL_MAPPINGS | Host→Device | Get current mappings | Yes |
+| 0x84 | ID_GET_ATTRIBUTE_LABEL | Host→Device | Get attribute label | Yes |
+| 0x85 | ID_SET_DEFAULT_DIGITAL_MAPPINGS | Host→Device | Set default mappings | Yes |
+| 0x86 | ID_FACTORY_RESET | Host→Device | Factory reset | Yes |
+| 0x88 | ID_CLEAR_SETTINGS_VALUES | Host→Device | Clear settings | **No** (gap) |
+| 0x89 | ID_GET_SETTINGS_VALUES | Bidirectional | Get current settings | **No** (gap) |
+| 0x8A | ID_GET_SETTING_LABEL | Host→Device | Get setting label | Yes |
+| 0x8B | ID_GET_SETTINGS_MAXS | Host→Device | Get max values | Yes |
+| 0x8C | ID_GET_SETTINGS_DEFAULTS | Host→Device | Get default values | Yes |
+| 0x8D | ID_SET_CONTROLLER_MODE | Host→Device | Mode switch (lizard ↔ Steam Input) | Yes |
+| 0x8E | ID_LOAD_DEFAULT_SETTINGS | Host→Device | Load default settings | Yes |
+| 0x9F | ID_TURN_OFF_CONTROLLER | Host→Device | Turn off controller | Yes |
+| 0xA1 | ID_GET_DEVICE_INFO | Host→Device | Get device info | Yes |
+| 0xBA | ID_GET_CHIP_ID | Bidirectional | Get chip ID | Yes |
+| 0xF2 | CAPABILITY_QUERY_UNKNOWN | Bidirectional | Per-category capability query | Yes |
+
+### Additional Commands in Firmware (not in steamclient.so RE)
+
+The firmware handles ~80 additional commands across these categories:
+- **System** (37 commands): power management, LED control,陀螺仪 calibration, factory reset variants
+- **Configuration** (22 commands): settings read/write for trackpad, stick, trigger, IMU parameters
+- **Calibration** (18 commands): stick/trigger/trackpad/IMU calibration data
+- **Battery/Power** (6 commands): battery level, charging state, power management
+- **Firmware** (6 commands): firmware update, bootloader entry, version queries
+- **Input Report** (1 command): report mode switching
+- **LED** (2 commands): RGB LED control
+
+### Response Formatter
+
+38 commands have detailed response formats in the firmware's response formatter (`FUN_0000c55c`). Commands 0x01-0x19 and 0x82/0x83 have specific response codes and payload sizes.
 
 ## Settings Registers
 

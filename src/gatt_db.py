@@ -69,6 +69,7 @@ CHR_HID_INFO = 0x2A4A
 CHR_REPORT_MAP = 0x2A4B
 CHR_HID_CONTROL_POINT = 0x2A4C
 CHR_REPORT = 0x2A4D
+CHR_PROTOCOL_MODE = 0x2A4E
 CHR_BATTERY_LEVEL = 0x2A19
 CHR_MANUFACTURER_NAME = 0x2A29
 CHR_MODEL_NUMBER = 0x2A24
@@ -449,6 +450,7 @@ def build_sc2_database(device_name="Steam Controller 2026"):
     # HID Service (0x1812)
     db.add_service(SVC_HID, [
         (CHR_HID_INFO, ATT_PROP_READ, hid_info),
+        (CHR_PROTOCOL_MODE, ATT_PROP_READ | ATT_PROP_WRITE_NO_RSP, bytes([0x01])),  # Report Protocol mode
         (CHR_REPORT_MAP, ATT_PROP_READ, report_map),
         (CHR_HID_CONTROL_POINT, ATT_PROP_WRITE_NO_RSP, b'\x00'),
         (CHR_REPORT, ATT_PROP_READ | ATT_PROP_NOTIFY, b'\x00' * 12, [

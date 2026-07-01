@@ -44,33 +44,35 @@ Host sends ATT PDU → Kernel L2CAP → Our raw socket (CID 4) → _handle_pdu()
 | 0x000A | 0x2800 | HID Service Declaration |
 | 0x000B | 0x2803 | HID Information Characteristic |
 | 0x000C | 0x2A4A | HID Information Value |
-| 0x000D | 0x2803 | Report Map Characteristic |
-| 0x000E | 0x2A4B | Report Map Value (77 bytes / standard 186 bytes layout) |
-| 0x000F | 0x2803 | HID Control Point Characteristic |
-| 0x0010 | 0x2A4C | HID Control Point Value |
-| 0x0011 | 0x2803 | Report (Gamepad Input) Characteristic |
-| 0x0012 | 0x2A4D | Report (Gamepad Input) Value (12 bytes) |
-| 0x0013 | 0x2908 | Report Reference (Gamepad Input, ID=1) |
-| 0x0014 | 0x2902 | Report (Gamepad Input) CCCD |
-| 0x0015 | 0x2803 | Report (Output) Characteristic |
-| 0x0016 | 0x2A4D | Report (Output) Value (1 byte) |
-| 0x0017 | 0x2908 | Report Reference (Output, ID=2) |
-| 0x0018 | 0x2803 | Report (Mouse Input) Characteristic |
-| 0x0019 | 0x2A4D | Report (Mouse Input) Value (4 bytes) |
-| 0x001A | 0x2908 | Report Reference (Mouse Input, ID=3) |
-| 0x001B | 0x2902 | Report (Mouse Input) CCCD |
-| 0x001C | 0x2803 | Report (Keyboard Input) Characteristic |
-| 0x001D | 0x2A4D | Report (Keyboard Input) Value (8 bytes) |
-| 0x001E | 0x2908 | Report Reference (Keyboard Input, ID=4) |
-| 0x001F | 0x2902 | Report (Keyboard Input) CCCD |
-| 0x0020 | 0x2803 | Feature Report 0x00 Characteristic |
-| 0x0021 | 0x2A4D | Feature Report 0x00 Value (64 bytes) |
-| 0x0022 | 0x2908 | Report Reference (Feature, ID=0x00) |
-| 0x0023 | 0x2803 | Feature Report 0x01 Characteristic |
-| 0x0024 | 0x2A4D | Feature Report 0x01 Value (64 bytes) |
-| 0x0025 | 0x2908 | Report Reference (Feature, ID=0x01) |
-| 0x0026 | 0x2803 | Feature Report 0x85 Characteristic |
-| 0x0027 | 0x2A4D | Feature Report 0x85 Value (64 bytes) |
+| 0x000D | 0x2803 | Protocol Mode Characteristic |
+| 0x000E | 0x2A4E | Protocol Mode Value (0x01 = Report Protocol) |
+| 0x000F | 0x2803 | Report Map Characteristic |
+| 0x0010 | 0x2A4B | Report Map Value (77 bytes / standard 186 bytes layout) |
+| 0x0011 | 0x2803 | HID Control Point Characteristic |
+| 0x0012 | 0x2A4C | HID Control Point Value |
+| 0x0013 | 0x2803 | Report (Gamepad Input) Characteristic |
+| 0x0014 | 0x2A4D | Report (Gamepad Input) Value (12 bytes) |
+| 0x0015 | 0x2908 | Report Reference (Gamepad Input, ID=1) |
+| 0x0016 | 0x2902 | Report (Gamepad Input) CCCD |
+| 0x0017 | 0x2803 | Report (Output) Characteristic |
+| 0x0018 | 0x2A4D | Report (Output) Value (1 byte) |
+| 0x0019 | 0x2908 | Report Reference (Output, ID=2) |
+| 0x001A | 0x2803 | Report (Mouse Input) Characteristic |
+| 0x001B | 0x2A4D | Report (Mouse Input) Value (4 bytes) |
+| 0x001C | 0x2908 | Report Reference (Mouse Input, ID=3) |
+| 0x001D | 0x2902 | Report (Mouse Input) CCCD |
+| 0x001E | 0x2803 | Report (Keyboard Input) Characteristic |
+| 0x001F | 0x2A4D | Report (Keyboard Input) Value (8 bytes) |
+| 0x0020 | 0x2908 | Report Reference (Keyboard Input, ID=4) |
+| 0x0021 | 0x2902 | Report (Keyboard Input) CCCD |
+| 0x0022 | 0x2803 | Feature Report 0x00 Characteristic |
+| 0x0023 | 0x2A4D | Feature Report 0x00 Value (64 bytes) |
+| 0x0024 | 0x2908 | Report Reference (Feature, ID=0x00) |
+| 0x0025 | 0x2803 | Feature Report 0x01 Characteristic |
+| 0x0026 | 0x2A4D | Feature Report 0x01 Value (64 bytes) |
+| 0x0027 | 0x2908 | Report Reference (Feature, ID=0x01) |
+| 0x0028 | 0x2803 | Feature Report 0x85 Characteristic |
+| 0x0029 | 0x2A4D | Feature Report 0x85 Value (64 bytes) |
 | 0x0028 | 0x2908 | Report Reference (Feature, ID=0x85) |
 | 0x0029 | 0x2803 | Feature Report 0x86 Characteristic |
 | 0x002A | 0x2A4D | Feature Report 0x86 Value (64 bytes) |
@@ -110,7 +112,7 @@ Host sends ATT PDU → Kernel L2CAP → Our raw socket (CID 4) → _handle_pdu()
 ### Host Discovery Sequence
 
 1. `Exchange MTU Request` → `Exchange MTU Response`
-2. `Read By Group Type` (UUID 0x2800) → 5 services found
+2. `Read By Group Type` (UUID 0x2800) → 6 services found (GAP, GATT, HID, Valve Custom, Battery, Device Info)
 3. `Read By Type` (UUID 0x2803) → characteristics in each service
 4. `Find Information` → descriptors (especially CCCD 0x2902)
 5. `Write` to CCCD → enable notifications
@@ -252,3 +254,55 @@ def send_notification(self, handle, value):
     pdu = struct.pack('<BH', 0x1B, handle) + value
     self.conn.send(pdu)
 ```
+
+---
+
+## Firmware GATT Comparison (2026-06-30)
+
+Detailed comparison with the real SC2 firmware's GATT registration (`FUN_0001d8d0`, extracted from Ghidra analysis of `IBEX_FW_6A3F2424.fw`).
+
+### Firmware GATT Registration
+
+The firmware uses Zephyr's `bt_gatt_pool` API to register GATT services:
+- `bt_gatt_pool_init_service` — service declarations
+- `bt_gatt_pool_register_chrc` — characteristics (UUID, properties, permissions)
+- `bt_gatt_pool_register_descriptor` — descriptors (UUID, permissions)
+- `bt_gatt_pool_register_ccc` — CCCD descriptors
+
+Handle allocation is dynamic, using 20-byte attribute entries and 8-byte UUID pool entries.
+
+### Service Comparison
+
+| Service | Firmware | Our Server | Notes |
+|---------|----------|------------|-------|
+| GAP (0x1800) | Pre-registered by BLE stack | Explicitly registered | Redundant but harmless |
+| GATT (0x1801) | Pre-registered by BLE stack | Explicitly registered | Redundant but harmless |
+| HID (0x1812) | Explicitly registered | Registered | **Differences in characteristics** |
+| Battery (0x180F) | **NOT in firmware** | Registered | Required by BlueZ HOGP |
+| Device Info (0x180A) | **NOT in firmware** | Registered | Required by BlueZ HOGP |
+
+### HID Characteristic Comparison
+
+| Characteristic | Firmware | Our Server | Status |
+|---------------|----------|------------|--------|
+| Protocol Mode (0x2A4E) | Read+WriteNoResp (0x06) | **MISSING** | **NEEDED** |
+| Report Input (0x2A4D) | Up to 6 instances, Read+Notify (0x12) | 1 instance (ID=1) | **IDs 2-4 MISSING** |
+| Report Output (0x2A4D) | Up to 10 instances, Read+WriteNoResp+Write (0x0E) | ID=2 only | Partial |
+| Feature Reports (0x2A4D) | In output group | IDs 0x80, 0x85-0x87 | OK (but in output group) |
+| Custom CHR_REPORT (0x2A4D) | 0-1 instance, Read+WriteNoResp (0x0A) | IDs 0x45, 0x47 | OK |
+| Boot KB Output (0x2A33) | Optional, Read+Notify (0x12) | MISSING | Skip (Valve-proprietary UUID) |
+| Boot KB Input (0x2A22) | Optional, Read+Notify (0x12) | MISSING | Optional |
+| Boot KB Output (0x2A32) | Optional, Read+WriteNoResp+Write (0x0E) | MISSING | Optional |
+| Report Map (0x2A4B) | Read (0x02) | Read | OK |
+| HID Information (0x2A4A) | Read (0x02) | Read | OK |
+| HID Control Point (0x2A4C) | WriteNoResp (0x04) | WriteNoResp | OK |
+
+### Key Differences
+
+1. **Protocol Mode (0x2A4E)** — The firmware explicitly registers this characteristic. Hog-ll may require it during init to determine Report Protocol mode. Our server does not have it.
+
+2. **Missing Report IDs 2-4** — The firmware creates up to 6 input Report characteristics (IDs assigned sequentially via `cVar19` counter). Our server only has ID=1 (gamepad). Mouse (ID=3) and Keyboard (ID=4) are in our report map but not registered as separate 0x2A4D characteristics.
+
+3. **Battery/Device Info** — The firmware does NOT register these in its GATT setup. However, BlueZ's HOGP driver requires them for `/dev/hidrawN` creation. These are likely extra in our server but necessary for BlueZ compatibility.
+
+4. **Report Reference descriptor in Report characteristics** — The firmware registers 0x2908 (Report Reference) descriptors for each Report characteristic, matching our implementation.

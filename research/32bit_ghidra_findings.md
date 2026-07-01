@@ -175,3 +175,38 @@ bt_hog_attach() (hog-lib.c:1720)
 | `exports/32bit/controller_xrefs_32bit.txt` | Xrefs to 12 controller-related strings |
 | `exports/32bit/key_disassembly.txt` | Assembly for 9 known addresses |
 | `exports/64bit/decompiled_64bit.txt` | Decompiled C for 18 key addresses (64-bit reference) |
+
+---
+
+## Firmware RE Findings (2026-06-30)
+
+Ghidra analysis of the actual SC2 controller firmware (`IBEX_FW_6A3F2424.fw`) confirms and extends the host-side RE findings.
+
+### Confirmed Matches (Firmware ↔ steamclient.so)
+
+| Item | Firmware | steamclient.so | Status |
+|------|----------|---------------|--------|
+| Report 0x45 format | Byte-for-byte identical | Parsed correctly | ✅ Confirmed |
+| PnP ID | VID=0x28DE, PID=0x1303 | Expected correctly | ✅ Confirmed |
+| GET_ATTRIBUTES (0x83) | Handled in command dispatch | Handled in synthetic handler | ✅ Confirmed |
+| 0x8F command | Exists in firmware command table | Blocked by host-side gate | ⚠️ Gate is host-side |
+
+### Key Findings
+
+1. **Command table**: 100 total commands in firmware (we handle 9). Jump table at `0x00053f94`.
+2. **0x8F gate**: The gate at `[esi+0x17c]` is entirely in steamclient.so. Firmware handles 0x8F correctly.
+3. **ESB protocol**: Puck is a transparent relay. Report IDs identical between ESB, USB, BLE.
+4. **GATT layout**: Only HID Service (0x1812) explicitly registered. Battery/Device Info NOT in firmware.
+5. **Button bitmask**: Neptune HID path matches SDL3 exactly. No changes needed.
+6. **State machine**: 25 states using Zephyr SMF. BLE and ESB coexist.
+
+### Firmware-Specific Addresses
+
+| Address | Function | Description |
+|---------|----------|-------------|
+| `0x0001d8d0` | `FUN_0001d8d0` | GATT registration — registers HID service with bt_gatt_pool API |
+| `0x00013fe0` | `FUN_00013fe0` | Report sender — sets Report ID 0x45, copies 45 bytes, sends via BLE notification |
+| `0x000127cc` | `FUN_000127cc` | Button bitfield assembly — builds 32-bit button bitmask |
+| `0x000383c4` | `FUN_000383c4` | Main command dispatch — 95-entry jump table |
+| `0x00054368` | `case 0x8f` | 0x8F haptic pulse handler in firmware |
+| `0x0003fc3e` | `FUN_0003fc3e` | CCCD gate — walks GATT DB before every notification send |

@@ -110,6 +110,28 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 4. **BlueZ hog-lib.c analysis** — Confirmed `forward_report()` uses ATT Write Request (0x12), not Write Command (0x52)
 5. **Manual write test** — Writing directly to `/dev/hidrawN` on host confirmed UHID output path works end-to-end
 
+### Firmware RE Findings (2026-06-30)
+
+Ghidra analysis of both firmware files. Full decompiled C exports at `/tmp/decompiled_v2/`.
+
+| Firmware | File | Size | Functions | Lines |
+|----------|------|------|-----------|-------|
+| Triton SC2 BLE | `/tmp/ibex_firmware.bin` | 343 KB | 2,027 | 73,705 |
+| Puck Dongle | `/tmp/proteus_firmware.bin` | 194 KB | 790 | 36,117 |
+
+**Architecture**: Nordic nRF52840 (ARM Cortex-M4F), Zephyr RTOS, nRF Connect SDK v2.9.0, Nordic SoftDevice Controller.
+
+**Key findings**:
+- **100 total commands** in firmware command dispatch (we handle 9)
+- **0x8F gate** is entirely in steamclient.so — firmware handles 0x8F correctly
+- **Puck is transparent relay** — report IDs identical between ESB, USB, BLE ATT
+- **Triton supports BLE + ESB simultaneously**
+- **GATT**: Only HID Service (0x1812) explicitly registered; Battery/Device Info NOT in firmware
+- **Button bitmask**: Neptune HID path matches SDL3 exactly
+
+**Ghida projects**: `/tmp/ghidra_fw_projects_v2/` (IBEX_Triton.gpr, PROTEUS_Puck.gpr)
+**Firmware extracts**: `/tmp/ibex_firmware.bin`, `/tmp/proteus_firmware.bin`
+
 ### What Needs to Happen Next
 
 1. ~~**⚠️ CRITICAL: ALL PRIOR BINARY ANALYSIS WAS ON THE WRONG BINARY**~~ — **RESOLVED (2026-06-30)**. All RE analysis files updated to use 32-bit (`ubuntu12_32/steamclient.so`) addresses. 56 files changed, 1424 insertions, 1345 deletions. 52 string addresses verified, 26 function addresses marked `[NEEDS RE-ANALYSIS]`.

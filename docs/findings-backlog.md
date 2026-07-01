@@ -529,3 +529,57 @@ When implementing fixes, follow this order (one at a time, test between each):
 10. 45-byte report layout doc update (sc2-protocol.md)
 11. Feature Reports in Report Map (gatt_db.py)
 12. CCCD keying fix (att_server.py)
+
+---
+
+## Firmware Reverse Engineering Findings (2026-06-30)
+
+Ghidra analysis of `IBEX_FW_6A3F2424.fw` (Triton/SC2 BLE, nRF52840, Zephyr RTOS) and `PROTEUS_FW_6A3F2420.fw` (Puck dongle).
+
+### Firmware Architecture
+- **MCU**: Nordic nRF52840 (ARM Cortex-M4F)
+- **RTOS**: Zephyr RTOS via nRF Connect SDK v2.9.0
+- **BLE Stack**: Nordic SoftDevice Controller (open-source Zephyr)
+- **IBEX firmware**: 2027 functions, 73K lines decompiled C
+- **PROTEUS firmware**: 790 functions, 36K lines decompiled C
+
+### Command Table
+- **100 total commands** in firmware command dispatch (`FUN_000383c4` at `0x000383c4`, jump table at `0x00053f94`)
+- 9 known to us (0x45, 0x47, 0x80, 0x81, 0x82, 0x83, 0x87, 0x8F, 0xAE)
+- 91 unknown across 8 categories: system (37), config (22), calibration (18), battery (6), firmware (6), input (1), LED (2)
+- Commands 0x87, 0x88, 0x89 are **gaps** in the firmware table (jumps from 0x86 to 0x8a)
+- 0xAE (GET_SERIAL) NOT in firmware table — handled at BLE co-processor level
+- 38 commands have detailed response formats in response formatter (`FUN_0000c55c`)
+
+### 0x8F Haptic Gate
+- The gate at `[esi+0x17c]` is **entirely in steamclient.so**, not firmware
+- Firmware handles 0x8F correctly as a standard command (`case 0x8f` at `0x54368`)
+- Gate SET at `0x0178a140` (inside YieldingRunTestProgram job)
+- Gate CHECK at `0x0123e5fb` (skips 0x8F dispatch if gate==0)
+- Two separate haptic paths: output reports 0x80-0x85 (works, bypasses gate) vs feature report 0x8F (blocked by gate)
+
+### Button Bitmask
+- Neptune HID path: all 28 button bits match SDL3 exactly
+- evdev Xbox path: BTN_SELECT and BTN_START are swapped — **intentional** (tested and required for correct registration)
+- Bitfield assembly in `FUN_000127cc`
+
+### Puck (Dongle) ESB Protocol
+- **Transparent relay** — report IDs preserved identically between ESB, USB HID, and BLE ATT
+- Standard Nordic ESB: 5-byte address, 2Mbps, auto-ACK, 15 retransmits
+- 4 pipe-based slots with independent ESB pipes, HID proxy instances, bond storage
+- Protocol version negotiation before data flows
+- ESB is irrelevant for BLE spoofing — command set is transport-agnostic
+
+### GATT Layout (Firmware vs Ours)
+- Only HID Service (0x1812) explicitly registered in firmware
+- GAP/GATT pre-registered by BLE stack
+- Battery (0x180F) and Device Info (0x180A) NOT in firmware GATT registration
+- Protocol Mode (0x2A4E) registered but missing from our server
+- Up to 6 input + 10 output/feature Report characteristics possible
+- Valve-proprietary UUID 0x2A33 for Boot KB Output
+
+### Extracted Files
+- `/tmp/ibex_firmware.bin` — raw firmware payload (350,528 bytes)
+- `/tmp/proteus_firmware.bin` — raw firmware payload (197,740 bytes)
+- `/tmp/decompiled_v2/` — full Ghidra exports (strings, string xrefs, call graph, decompiled C)
+- `/tmp/ghidra_fw_projects_v2/` — Ghidra project directories
