@@ -2,6 +2,8 @@
 
 Make a Steam Deck present itself as a Steam Controller 2026 (SC2) over Bluetooth Low Energy, enabling Steam Input support (trackpads, gyro, back buttons) without USB wired mode.
 
+[MIT License](LICENSE)
+
 ## Current Status
 
 **Working**: Gamepad, trackpads, gyro, back buttons, standard HID input, in-game rumble via `SDL_RumbleJoystick()`. Steam Client recognizes the Deck as an SC2 controller with full Steam Input features.

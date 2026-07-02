@@ -251,8 +251,9 @@ Ghidra analysis of SC2 BLE firmware (`ibex_firmware.bin`, 2027 functions, 73K li
 │   ├── pair.py                      # Pexpect auto-pair (handles KDE dialog)
 │   └── connect_deck.py              # BLE connection (subprocess-based)
 ├── firmware/
-│   ├── ibex_firmware.bin            # Triton SC2 BLE firmware (350KB, nRF52840)
-│   └── proteus_firmware.bin         # Puck Dongle firmware (194KB)
+│   ├── README.md                      # Firmware metadata, checksums, version info
+│   ├── ibex_firmware.bin              # Placeholder — see firmware/README.md
+│   └── proteus_firmware.bin           # Placeholder — see firmware/README.md
 ├── ghidra-projects/                 # Ghidra exports (local, ~/ghidra-projects/exports/32bit/)
                                      # Also mirrored in ~/spoofdeck-ghidra/steamclient_exports/
 ├── dbus-config/                     # D-Bus system policy
