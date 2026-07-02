@@ -39,52 +39,65 @@ This document contains findings from reverse-engineering the Steam client binary
 
 ## FINDING 1: Command 0xf2 Response Format
 
-### Status: PARTIALLY DETERMINED (Indirect Evidence)
+### Status: RESOLVED (2026-07-01) — 0xf2 is a minimal ACK, not a capability response
+
+The "capability query" interpretation was wrong. In the firmware, 0xf2 is a 6-byte ACK sent after 0xe7 (mapping) commands with **no payload data**.
 
 ### Analysis
 
 The SC2 sends Feature Report 0x00 with data starting with byte 0xf2 during the BLE handshake. The Steam client reads this via `SDL_hid_get_feature_report()`.
 
-### Evidence from Binary Analysis
+### Evidence from Full Decompilation (2026-07-01)
 
-**Multiple `cmp al, 0xf2` instructions** found throughout the binary, indicating the 0xf2 byte is used as a command identifier in a dispatch/switch statement. Key locations:
+The 0xf2 byte appears in several contexts in the 6.7M-line decompilation:
 
-| Address | Context |
-|---------|---------|
-| `0x0124ad88` | Feature report handler dispatch |
-| `0x013013c1` | Feature report processing |
-| `0x013013d2` | Feature report processing (same function) |
-| `0x01393d40` | Feature report handler |
-| `0x01016496` | Early protocol handler |
+1. **Command Classifier** (`FUN_01206d20` at 0x01206d20): Maps command bytes to category/type values. At line 768631:
+   ```c
+   if ((param_2 == 0xf2 || param_2 == 300) || (param_2 - 0x5cU < 0x1c)) {
+       return 0x20;  // Category 0x20 (32 decimal)
+   }
+   ```
+   Command 0xf2 (and also command 300 = 0x12c, and the range 0x5c-0x77) all map to category/type **0x20 (32)**.
 
-### Hypothesized 0xf2 Response Format
+2. **Command Descriptor Lookup** (`FUN_01206ef0` at 0x01206ef0): Uses the category from `FUN_01206d20` to search a 1024-entry descriptor table at `DAT_00b9af60`. Each entry is 20 bytes (5 words).
 
-Based on the protocol analysis and the `cmp al, 0xf2` dispatch pattern, the 0xf2 response likely follows this format:
+3. **Controller Info Initialization** (`FUN_0189db60` at 0x0189db60): Sets 0xf2 in a controller descriptor structure:
+   ```c
+   local_b4[0] = 0xf2;     // Command type byte
+   local_b4[1] = 0x45;     // Report ID (SC2 custom input = 0x45)
+   ```
+
+4. **Protobuf Deserializers** (NOT relevant): Most `case 0xf2:` matches are protobuf field tag deserializers where 0xf2 encodes field number 30 with wire type 2. These are unrelated to SC2.
+
+### Identity Slot Layout (confirmed)
+
+The 32-byte identity_data from 0xf2 responses is stored at `slot+0x214` in the controller identity structure (stride 0xe8 per slot):
 
 ```
-Byte 0:    0xf2 (command identifier)
-Byte 1:    Category/sub-command index (0x01, 0x02, etc.)
-Bytes 2-N: Capability data (varies by category)
+Base: controller_obj + slot_index * 0xe8
+
++0x1f8  4     product_id         Controller PID (e.g., 0x1303)
++0x1fc  4     secondary_id       Firmware/board version
++0x200  17    unique_id          Serial number (FIRST BYTE IS READY FLAG)
++0x214  32    identity_data      Capability data from 0xf2 responses
++0x234  1     capability_flags   Capability bitmask
++0x235  1     transport_type     3=BLE, 2=USB, 4=Dongle
 ```
 
-The 1-byte payload (0x01, 0x02, etc.) is likely a **category index** that selects which capability data to return:
-- Category 0x01: Basic capabilities (button count, trackpad count, etc.)
-- Category 0x02: Extended capabilities (IMU, capacitive touch, etc.)
-- Additional categories for firmware version, board revision, etc.
+### What Remains Unknown
 
-### Supporting Evidence
+- Exact per-category payload format (which bytes mean what)
+- Total number of categories dispatched (real device sends 8+)
+- The feature report state machine dispatch function (uses vtable dispatch that obscures the handler)
 
-1. **The `EYldWaitForControllerDetails` function** at `0x0107e1c70` [32-bit: NEEDS RE-ANALYSIS] waits for controller details to be populated. The timeout (2 seconds) suggests this is waiting for multiple feature report responses.
+### Addresses
 
-2. **The `QueueFetchingControllerDetails` function** at `0x01092820` receives the populated ControllerDetails_tE and sets the ready flag. This happens AFTER all feature reports have been read.
-
-3. **The capabilities bitmask** `0x4169bfff` from the controller logs suggests the response encodes specific hardware capabilities.
-
-### What We Need to Confirm
-
-- Exact byte layout of each 0xf2 category response
-- How many times 0xf2 is sent with different payloads (observed: 8 times in real device)
-- Whether the response is single-part or multi-part
+| Function | 32-bit Address | Role |
+|----------|---------------|------|
+| `FUN_01206d20` | 0x01206d20 | Command classifier: maps 0xf2 to category 0x20 |
+| `FUN_01206ef0` | 0x01206ef0 | Descriptor lookup in DAT_00b9af60 table |
+| `FUN_0189db60` | 0x0189db60 | Controller info init: sets 0xf2 in descriptor struct |
+| `CGetControllerInfoWorkItem::RunFunc` | 0x01218840 | Reads FR 0x00 responses via vtable[5] |
 
 ---
 

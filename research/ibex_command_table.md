@@ -276,3 +276,72 @@ Key strings in the firmware binary that identify command handlers:
 5. **0x8F is the master dispatcher** — It's a sub-command router that handles haptic pulses, attribute queries, and mapping operations. The case `0x8f` handler at `0x54368` (in the truncated region) processes the sub-command byte that follows.
 
 6. **Upper range (0x90+)** — Several commands above `0x8f` are documented from steamclient.so: `0x9F` (turn off), `0xA1` (get device info), `0xAE` (get serial), `0xBA` (get chip ID), `0xF2` (capability query). These are likely handled at a different code path within the same firmware, not in the main Ibex dispatch.
+
+### Resolved TBH Jump Table (2026-07-01)
+
+The dispatch uses a Thumb `tbh [pc, r3, lsl 1]` instruction at `0x000383ce`. The 144-entry halfword table starts at `0x000383d2`. Each entry is a 2-byte offset from the table base (`target = 0x383d2 + entry * 2`).
+
+| Code Range | Entries | Default Handler | Notes |
+|------------|---------|-----------------|-------|
+| 0x00–0x24 | Unique per command | — | System commands, all unique handlers |
+| 0x25–0x2c | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x2d–0x2e | Unique | — | Config |
+| 0x2f–0x3b | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x3c–0x47 | Unique | — | Config + input |
+| 0x48–0x49 | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x4a | Unique | — | LED GET |
+| 0x4b–0x4c | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x4d | Unique | — | LED SET |
+| 0x4e–0x52 | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x53–0x58 | Unique | — | Config |
+| 0x59 | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x5a–0x5c | Unique | — | Config |
+| 0x5d–0x5e | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x5f | Unique (0x0144 → `0x03865a`) | — | Config |
+| 0x60–0x67 | 0x014c → `0x03866a` | Default | Unhandled |
+| 0x68–0x71 | Unique | — | Calibration |
+| 0x72 | Unique (0x00ec → `0x0385aa`) | — | Calibration |
+| 0x73–0x7e | Unique | — | Calibration + battery |
+| 0x7f | Unique (0x013a → `0x038646`) | — | Battery |
+| 0x80 | Unique (0x0136 → `0x03863e`) | — | **Haptic motor output** |
+| 0x81–0x85 | 0x014c → `0x03866a` | Default | Handled outside dispatch |
+| 0x86 | Unique (0x00d6 → `0x03857e`) | — | Config |
+| 0x87–0x89 | 0x014c → `0x03866a` | Default | 0x87 handled outside dispatch |
+| 0x8a | Unique (0x00e8 → `0x0385a2`) | — | Firmware |
+| 0x8b–0x8e | Unique | — | Firmware |
+| 0x8f | Unique (0x0142 → `0x038656`) | — | **Sub-command dispatcher** |
+
+### Dispatch Callers (2026-07-01)
+
+The dispatch at `0x000383c4` is called by **1 tail-call wrapper** at `0x445f2` (sets r1=0, r2=0, branches to dispatch). Two higher-level callers invoke the wrapper:
+
+| Caller | Address | Call Sites | Purpose |
+|--------|---------|------------|---------|
+| `fcn.000180a8` | `0x180c8` | 1 | Controller command processing |
+| `fcn.00018320` | `0x183ac`, `0x1841a` | 2 | Controller command processing |
+
+Both callers follow the same pattern:
+1. Look up command type from a lookup function (returns negative value)
+2. Negate to get positive command code
+3. Call dispatch via wrapper → get descriptor pointer in r0
+4. Build 0x20-byte message structure: `[flags=0x1000003, msg_id, descriptor_ptr, buf_size=0x200]`
+5. Submit to firmware event system via `fcn.0001b07c`
+
+### 0xf2 ACK Format (2026-07-01)
+
+The 0xf2 response is **NOT a capability data response** — it is a minimal 6-byte ACK sent after 0xe7 (mapping) commands:
+
+```
+[0x01, 0x00, 0x00, 0x00, 0x00, 0xf2]
+ count   (zeroed)              type
+```
+
+Built by `FUN_00042132` at `0x00042132`. Part of a response family:
+| Function | Type Byte | Payload | Purpose |
+|----------|-----------|---------|---------|
+| `FUN_000420ae` | 0xf0 | MAC + UUID (20B) | Identity response |
+| `FUN_00042132` | 0xf2 | None | **Mapping ACK** |
+| `FUN_0004214a` | 0xf3 | Mode byte (1B) | Mode notification |
+| `FUN_00042108` | 0xf4 | Timestamp + model (20B) | Status response |
+
+The "capability query" interpretation from steamclient.so likely goes through a different protocol path (HID Feature Reports over ESB/USB, not BLE L2CAP commands).

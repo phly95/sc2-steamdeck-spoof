@@ -571,34 +571,12 @@ class HoGPeripheral:
             print(f"[DIAG] 🎮 → GET_SETTINGS_VALUES: returning {num_regs} registers")
 
         elif cmd == 0xf2:
-            # Unknown command 0xf2 — per-category capability/settings query
-            # Payload byte (value[2]) is the category index (0x01, 0x02, etc.)
-            # Try returning capability data for each category
-            category = value[2] if len(value) > 2 else 0
-            print(f"[DIAG] 🎮 → Command 0xf2: category=0x{category:02x}")
-            
-            if category == 0x01:
-                # Category 1: Return capabilities bitmask (0x4169bfff)
-                response = bytearray([
-                    0xf2,       # header.type = 0xf2
-                    category,   # echo category
-                    0x04,       # length = 4 bytes
-                    0xff, 0xbf, 0x69, 0x41,  # capabilities bitmask (LE)
-                ])
-                response += bytearray(64 - len(response))
-            elif category == 0x02:
-                # Category 2: Return settings register values
-                # Format: [0xf2, category, num_regs, reg, val_lo, val_hi, ...]
-                response = bytearray([0xf2, category, len(self._settings_store)])
-                for reg, val in sorted(self._settings_store.items()):
-                    response += bytes([reg, val & 0xFF, (val >> 8) & 0xFF])
-                response += bytearray(64 - len(response))
-            else:
-                # Unknown category — return zeros
-                response = bytearray([0xf2, category, 0x00])
-                response += bytearray(64 - len(response))
-            
-            print(f"[DIAG] 🎮 → 0xf2 response: {response[:20].hex()}...")
+            # 0xf2 is a MAPPING ACK — minimal 6-byte response per firmware FUN_00042132.
+            # Not a capability query. Sent by firmware after 0xe7 (mapping) commands.
+            # Format: [0x01, 0x00, 0x00, 0x00, 0x00, 0xf2] (6 bytes, no payload)
+            response = bytearray([0x01, 0x00, 0x00, 0x00, 0x00, 0xf2])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → Command 0xf2 (MAPPING_ACK): {response[:6].hex()}")
 
         elif cmd == self.SC2_CMD_SET_DEFAULT_MAPPINGS:
             # SET_DEFAULT_DIGITAL_MAPPINGS (0x85) — Acknowledge only, no mode switch
@@ -619,6 +597,48 @@ class HoGPeripheral:
             response += bytearray(64 - len(response))
             print(f"[DIAG] 🎮 → Acknowledging SET_CONTROLLER_MODE")
 
+        elif cmd == 0xB4:
+            # Protocol Version Query — blocking on native Deck, echo ack
+            response = bytearray([0xB4, 0x00, 0x01])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → Protocol Version Query (0xB4)")
+
+        elif cmd == 0xB5:
+            # Protocol Command — echo ack
+            response = bytearray([0xB5, 0x00])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → Protocol Command (0xB5)")
+
+        elif cmd == 0xEE:
+            # Feature Report Message (write) — echo ack
+            response = bytearray([0xEE, 0x00])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → Feature Report Message (0xEE)")
+
+        elif cmd == 0xEF:
+            # Feature Report Message (read/key) — echo ack
+            response = bytearray([0xEF, 0x00])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → Feature Report Message Read (0xEF)")
+
+        elif cmd == 0x95:
+            # Enter Bootloader — acknowledge but don't actually reboot
+            response = bytearray([0x95, 0x00])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → Enter Bootloader (0x95) — ignored on spoof")
+
+        elif cmd == 0x8C:
+            # GET_SETTINGS_DEFAULTS — return zero defaults
+            response = bytearray([0x8C, 0x00])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → GET_SETTINGS_DEFAULTS (0x8C)")
+
+        elif cmd == 0x82:
+            # GET_DIGITAL_MAPPINGS — firmware returns error (0xff, 0x02)
+            response = bytearray([0x82, 0xFF, 0x02])
+            response += bytearray(64 - len(response))
+            print(f"[DIAG] 🎮 → GET_DIGITAL_MAPPINGS (0x82) — error response")
+
         else:
             # Unknown command — echo back with proper header format
             response = bytearray([
@@ -633,11 +653,14 @@ class HoGPeripheral:
 
         # Map cmd byte to human name
         _SC2_CMD_NAMES = {
-            0x81: "CLEAR_DIGITAL_MAPPINGS", 0x83: "GET_ATTRIBUTES",
-            0x85: "SET_DEFAULT_DIGITAL_MAPPINGS", 0x87: "SET_SETTINGS_VALUES",
-            0x89: "GET_SETTINGS_VALUES", 0x8C: "GET_SETTINGS_DEFAULTS",
-            0x8D: "SET_CONTROLLER_MODE", 0xAE: "GET_SERIAL",
-            0xBA: "GET_CHIP_ID", 0xF2: "CAPABILITY_QUERY_UNKNOWN",
+            0x81: "CLEAR_DIGITAL_MAPPINGS", 0x82: "GET_DIGITAL_MAPPINGS",
+            0x83: "GET_ATTRIBUTES", 0x85: "SET_DEFAULT_DIGITAL_MAPPINGS",
+            0x87: "SET_SETTINGS_VALUES", 0x89: "GET_SETTINGS_VALUES",
+            0x8C: "GET_SETTINGS_DEFAULTS", 0x8D: "SET_CONTROLLER_MODE",
+            0xAE: "GET_SERIAL", 0xB4: "PROTOCOL_VERSION",
+            0xB5: "PROTOCOL_COMMAND", 0xBA: "GET_CHIP_ID",
+            0xEE: "FEATURE_REPORT_WRITE", 0xEF: "FEATURE_REPORT_READ",
+            0x95: "ENTER_BOOTLOADER", 0xF2: "MAPPING_ACK",
         }
         _proto_log("sc2_cmd", fr_id=f"0x{report_id:02x}", cmd=f"0x{cmd:02x}",
                    cmd_name=_SC2_CMD_NAMES.get(cmd, f"UNKNOWN_0x{cmd:02x}"),
@@ -716,13 +739,15 @@ class HoGPeripheral:
         # Build a map of known handles for diagnostic output
         handle_names = {}
         if self._report_handle:
-            handle_names[self._report_handle] = "Gamepad (0x0012)"
+            handle_names[self._report_handle] = f"Gamepad (0x{self._report_handle:04x})"
         if self._mouse_report_handle:
-            handle_names[self._mouse_report_handle] = "Mouse (0x001c)"
+            handle_names[self._mouse_report_handle] = f"Mouse (0x{self._mouse_report_handle:04x})"
         if self._keyboard_report_handle:
-            handle_names[self._keyboard_report_handle] = "Keyboard (0x0020)"
+            handle_names[self._keyboard_report_handle] = f"Keyboard (0x{self._keyboard_report_handle:04x})"
         if self._sc2_report_handle:
             handle_names[self._sc2_report_handle] = f"SC2 Custom (0x{self._sc2_report_handle:04x})"
+        if self._sc2_hid_handle:
+            handle_names[self._sc2_hid_handle] = f"SC2 CHR_REPORT (0x{self._sc2_hid_handle:04x})"
 
         name = handle_names.get(handle, f"Unknown (0x{handle:04x})")
         print(f"[DIAG] 📡 CCCD ENABLED: {name}")
@@ -738,6 +763,20 @@ class HoGPeripheral:
             if not self.steam_input_mode:
                 self.steam_input_mode = True
                 print(f"[DIAG] ⭐ AUTO MODE SWITCH: Host subscribed to {name} → Steam Input Mode")
+
+        # CCCD TIMING FIX: Send initial zero notifications to pre-fill the UHID queue.
+        # CGetControllerInfoWorkItem::RunFunc calls SDL_hid_read_timeout 51x at 100ms.
+        # If no data is available, it stalls the entire init chain (gate at [esi+0x17c]
+        # is never set, blocking haptics/commands). Sending zero reports immediately
+        # when the CCCD is enabled ensures data is available on the first read.
+        if handle == self._report_handle and self.att_server:
+            zero_gamepad = b'\x00' * 12
+            self.att_server.send_notification(self._report_handle, zero_gamepad)
+            print(f"[DIAG] Pre-filled UHID queue: 12-byte zero gamepad on handle 0x{self._report_handle:04x}")
+        if handle == self._sc2_hid_handle and self.att_server:
+            zero_sc2 = b'\x00' * 45
+            self.att_server.send_notification(self._sc2_hid_handle, zero_sc2)
+            print(f"[DIAG] Pre-filled UHID queue: 45-byte zero SC2 on handle 0x{self._sc2_hid_handle:04x}")
 
     def _on_att_disconnection(self, addr):
         print(f"[+] ATT connection lost from {addr}")

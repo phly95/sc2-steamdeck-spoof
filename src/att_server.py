@@ -62,6 +62,7 @@ from gatt_db import (
     ATT_OP_WRITE_CMD,
     ATT_ERR_INVALID_HANDLE, ATT_ERR_READ_NOT_PERM, ATT_ERR_WRITE_NOT_PERM,
     ATT_ERR_ATTR_NOT_FOUND, ATT_ERR_REQ_NOT_SUPP, ATT_ERR_INVALID_OFFSET,
+    ATT_ERR_INVALID_PDU,
     GATT_PRIM_SVC_UUID, GATT_CHARAC_UUID, uuid16_to_bytes,
 )
 
@@ -276,6 +277,9 @@ class AttServer:
     def _handle_read_by_group_type(self, data):
         """Handle Read By Group Type Request (0x10) — service discovery."""
         # Format: opcode(1) + start_handle(2) + end_handle(2) + [uuid(2 or 16)]
+        if len(data) < 5:
+            self._send_error(data[0], 0, ATT_ERR_INVALID_PDU)
+            return
         opcode = data[0]
         start_handle = struct.unpack('<H', data[1:3])[0]
         end_handle = struct.unpack('<H', data[3:5])[0]
@@ -317,6 +321,9 @@ class AttServer:
 
     def _handle_read_by_type(self, data):
         """Handle Read By Type Request (0x08) — characteristic discovery."""
+        if len(data) < 5:
+            self._send_error(data[0], 0, ATT_ERR_INVALID_PDU)
+            return
         opcode = data[0]
         start_handle = struct.unpack('<H', data[1:3])[0]
         end_handle = struct.unpack('<H', data[3:5])[0]
@@ -357,6 +364,9 @@ class AttServer:
 
     def _handle_find_info(self, data):
         """Handle Find Information Request (0x04) — descriptor discovery."""
+        if len(data) < 5:
+            self._send_error(data[0], 0, ATT_ERR_INVALID_PDU)
+            return
         opcode = data[0]
         start_handle = struct.unpack('<H', data[1:3])[0]
         end_handle = struct.unpack('<H', data[3:5])[0]

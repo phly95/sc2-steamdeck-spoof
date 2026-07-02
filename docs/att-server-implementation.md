@@ -28,7 +28,7 @@ Host sends ATT PDU → Kernel L2CAP → Our raw socket (CID 4) → _handle_pdu()
 
 ## GATT Database Structure
 
-### Handle Layout (74 attributes, 6 services)
+### Handle Layout (87 attributes, 6 services)
 
 | Handle | UUID | Description |
 |--------|------|-------------|
@@ -47,7 +47,7 @@ Host sends ATT PDU → Kernel L2CAP → Our raw socket (CID 4) → _handle_pdu()
 | 0x000D | 0x2803 | Protocol Mode Characteristic |
 | 0x000E | 0x2A4E | Protocol Mode Value (0x01 = Report Protocol) |
 | 0x000F | 0x2803 | Report Map Characteristic |
-| 0x0010 | 0x2A4B | Report Map Value (77 bytes / standard 186 bytes layout) |
+| 0x0010 | 0x2A4B | Report Map Value (~230 bytes: Gamepad, Mouse, Keyboard, SC2 Custom 0x45/0x47, Haptic 0x80, Feature Reports 0x00/0x01/0x85) |
 | 0x0011 | 0x2803 | HID Control Point Characteristic |
 | 0x0012 | 0x2A4C | HID Control Point Value |
 | 0x0013 | 0x2803 | Report (Gamepad Input) Characteristic |
@@ -285,10 +285,10 @@ Handle allocation is dynamic, using 20-byte attribute entries and 8-byte UUID po
 
 | Characteristic | Firmware | Our Server | Status |
 |---------------|----------|------------|--------|
-| Protocol Mode (0x2A4E) | Read+WriteNoResp (0x06) | **MISSING** | **NEEDED** |
-| Report Input (0x2A4D) | Up to 6 instances, Read+Notify (0x12) | 1 instance (ID=1) | **IDs 2-4 MISSING** |
+| Protocol Mode (0x2A4E) | Read+WriteNoResp (0x06) | Present at 0x000D/0x000E | OK |
+| Report Input (0x2A4D) | Up to 6 instances, Read+Notify (0x12) | 3 instances (ID=1, 3, 4) | OK |
 | Report Output (0x2A4D) | Up to 10 instances, Read+WriteNoResp+Write (0x0E) | ID=2 only | Partial |
-| Feature Reports (0x2A4D) | In output group | IDs 0x80, 0x85-0x87 | OK (but in output group) |
+| Feature Reports (0x2A4D) | In output group | IDs 0x00, 0x01, 0x85, 0x86, 0x87 (in Report Map) | OK |
 | Custom CHR_REPORT (0x2A4D) | 0-1 instance, Read+WriteNoResp (0x0A) | IDs 0x45, 0x47 | OK |
 | Boot KB Output (0x2A33) | Optional, Read+Notify (0x12) | MISSING | Skip (Valve-proprietary UUID) |
 | Boot KB Input (0x2A22) | Optional, Read+Notify (0x12) | MISSING | Optional |
@@ -299,10 +299,8 @@ Handle allocation is dynamic, using 20-byte attribute entries and 8-byte UUID po
 
 ### Key Differences
 
-1. **Protocol Mode (0x2A4E)** — The firmware explicitly registers this characteristic. Hog-ll may require it during init to determine Report Protocol mode. Our server does not have it.
+1. **Feature Reports in Report Map** — Feature Reports 0x00, 0x01, 0x85 are now declared in the HID Report Map as Feature collections (Logical, Vendor Defined 0xFF00). This allows Steam's SC2 HIDAPI driver to discover them during Report Map parsing.
 
-2. **Missing Report IDs 2-4** — The firmware creates up to 6 input Report characteristics (IDs assigned sequentially via `cVar19` counter). Our server only has ID=1 (gamepad). Mouse (ID=3) and Keyboard (ID=4) are in our report map but not registered as separate 0x2A4D characteristics.
+2. **Battery/Device Info** — The firmware does NOT register these in its GATT setup. However, BlueZ's HOGP driver requires them for `/dev/hidrawN` creation. These are extra in our server but necessary for BlueZ compatibility.
 
-3. **Battery/Device Info** — The firmware does NOT register these in its GATT setup. However, BlueZ's HOGP driver requires them for `/dev/hidrawN` creation. These are likely extra in our server but necessary for BlueZ compatibility.
-
-4. **Report Reference descriptor in Report characteristics** — The firmware registers 0x2908 (Report Reference) descriptors for each Report characteristic, matching our implementation.
+3. **Report Reference descriptor in Report characteristics** — The firmware registers 0x2908 (Report Reference) descriptors for each Report characteristic, matching our implementation.

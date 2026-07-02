@@ -1,41 +1,96 @@
 # SpoofDeck: Steam Deck → Steam Controller 2026 BLE Spoof
 
-Make a Steam Deck present itself as a Steam Controller 2026 over Bluetooth Low Energy, enabling Steam Input support (trackpads, gyro, back buttons) without USB wired mode.
+Make a Steam Deck present itself as a Steam Controller 2026 (SC2) over Bluetooth Low Energy, enabling Steam Input support (trackpads, gyro, back buttons) without USB wired mode.
 
 ## Current Status
 
-**Working**: Gamepad, trackpads, gyro, back buttons, standard HID input, in-game rumble via `SDL_RumbleJoystick()`. Steam Client recognizes the Deck as an SC2 controller with full Steam Input features. In-game rumble confirmed working with Celeste hazard impacts.
+**Working**: Gamepad, trackpads, gyro, back buttons, standard HID input, in-game rumble via `SDL_RumbleJoystick()`. Steam Client recognizes the Deck as an SC2 controller with full Steam Input features.
 
-**Not working**: Steam-generated haptics (trackpad clicks, UI feedback) do NOT produce rumble. These come from Steam's internal haptic system, not from `SDL_RumbleJoystick()`. Only games that call `SDL_RumbleJoystick()` produce rumble.
+**Not working**: Steam-generated haptics (trackpad clicks, UI feedback) do NOT produce rumble. The root cause is a CCCD subscription timing gap — notifications don't reach `/dev/hidrawN` during the init window, so `CGetControllerInfoWorkItem::RunFunc` stalls before the gate is set. A fix has been implemented (sending initial zero notifications on CCCD enable) but needs testing.
 
 **Stable**: Registration completes reliably. No zombie disconnects after clearing stale BlueZ state.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Steam Deck (Peripheral)                 │
-│                                                          │
-│  main_l2cap.py                                           │
-│  ├─ GLib main loop (BlueZ D-Bus advertising)             │
-│  ├─ Agent1 (auto-confirm pairing)                        │
-│  └─ Raw L2CAP ATT server (CID 4, BDADDR_LE_RANDOM)      │
-│     └─ Serves GATT database (85 attributes, 6 services)  │
-│     └─ Sends input reports as BLE notifications           │
-│                                                          │
-│  BlueZ handles: SMP (CID 6) + Advertising                │
-│  Input: /dev/hidraw3 (Neptune controller HID)            │
-│  └─ input_handler.py reads 64-byte reports               │
-│  └─ Maps Neptune buttons → SC2 reports                   │
-│  └─ Sends as ATT notifications                            │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Steam Deck (Peripheral)                     │
+│                                                              │
+│  main_l2cap.py                                               │
+│  ├─ GLib main loop (BlueZ D-Bus advertising)                 │
+│  ├─ Agent1 (auto-confirm pairing via dbus-python)            │
+│  └─ Raw L2CAP ATT server thread                              │
+│     └─ Binds to C2:12:34:56:78:9A CID 4                     │
+│     └─ Handles all ATT PDU exchange                           │
+│     └─ Serves GATT database (87 attributes, 6 services)      │
+│                                                              │
+│  ┌─────────────────────┐  ┌──────────────────────────────┐  │
+│  │  gatt_db.py         │  │  att_server.py               │  │
+│  │  (87 attributes,    │  │  (Raw L2CAP socket           │  │
+│  │   6 services)       │  │   on CID 4)                  │  │
+│  └─────────────────────┘  └──────────────────────────────┘  │
+│                                                              │
+│  BlueZ handles:                                              │
+│  ├─ SMP pairing (kernel, CID 6)                              │
+│  ├─ LE advertising (LEAdvertisingManager1)                   │
+│  └─ Agent registration (AgentManager1)                       │
+│                                                              │
+│  Input: /dev/hidraw3 (Neptune controller, USB iface 2)       │
+│  ├─ input_handler.py reads 64-byte HID reports               │
+│  ├─ Maps Neptune buttons → SC2 12-byte report                │
+│  └─ Sends as ATT notifications (no Report ID prefix)         │
+│                                                              │
+│  Lizard mode: periodically re-sends 0x81 cmd to disable      │
+└──────────────────────────────────────────────────────────────┘
               │
               │ BLE (static random addr C2:12:34:56:78:9A)
               ▼
-┌──────────────────────────────────────────────────────────┐
-│                    Host PC (Central)                      │
-│  BlueZ hog-ll driver → /dev/hidrawN → Steam Client       │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Host PC (Central)                          │
+│                                                              │
+│  BlueZ hog-ll driver → /dev/hidrawN → Steam Client           │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Input Path (NOT gated — works immediately)
+
+```
+BLE ATT Notification → hog-ll → UHID → /dev/hidrawN
+  → PollControllers (0x011e0930)
+    → vtable[0x10]: non-blocking HID read
+    → vtable[0x30]: PARSE report
+    → vtable[0x34]: normalize sticks, apply deadzone
+    → vtable[0x38]: apply calibration from VDF config
+    → vtable[0x3c]: detect changes
+  → Master Controller Processing (FUN_0126b130)
+  → Per-Controller Processing (FUN_01285c30)
+    → FUN_012857d0: generate Steam Input data
+    → Create work item for Steam Input system
+```
+
+### Command Path (GATED — blocked by init chain stall)
+
+```
+Gate CHECK at 0x0123e5fb: cmp byte [esi+0x17c], 0
+  → If 0: skip entire command pipeline
+  → If 1: proceed with commands
+    → 0x80 (Rumble), 0x81 (Clear Mappings), 0x83 (Get Attributes)
+    → 0x85 (Set Mode), 0xB4 (Protocol Version), 0xEE/0xEF (Feature Messages)
+    → Gyro enable/disable (0x50/0x30) via vtable[0x50]
+    → Mode switch (0x08/0x09) via vtable[0x50]
+```
+
+### Haptic Pipeline (game rumble — working)
+
+```
+Game → SDL_RumbleJoystick(low_freq, high_freq)
+  → HIDAPI_DriverSteamTriton_RumbleJoystick() [every 6ms, 40ms throttle]
+  → SDL_hid_write(device, buffer, 10) [Report ID 0x80]
+  → write("/dev/hidrawN") → kernel hidraw
+  → uhid_hid_output_raw() → UHID_OUTPUT → BlueZ hog-ll
+  → forward_report() → gatt_write_char() [ATT 0x12, handle 0x0019]
+  → _on_haptic_write() → _forward_haptic_to_neptune()
+  → PackedRumbleReport to /dev/hidraw3 → Neptune ERM motors
 ```
 
 ## Why Raw L2CAP?
@@ -79,54 +134,176 @@ evtest /dev/input/eventN
 - **SMP pairing**: Auto-confirm via BlueZ Agent1 D-Bus interface
 - **Input capture**: Reads Neptune controller from `/dev/hidraw3` (64-byte HID reports)
 - **SC2 report mapping**: Neptune → 12-byte gamepad + 45-byte SC2 Custom (buttons, sticks, triggers, trackpads, gyro)
-- **Synthetic SC2 command handler**: Responds to GET_ATTRIBUTES, GET_SERIAL, SET_SETTINGS, etc.
+- **Synthetic SC2 command handler**: Responds to GET_ATTRIBUTES, GET_SERIAL, SET_SETTINGS, and 10 other commands with correct formats
 - **Lizard mode fix**: Periodically re-sends 0x81 command to prevent lizard mode re-enabling; EVIOCGRAB grabs event4/event5 at startup
 - **Auto-recovery**: Retries Neptune hidraw device on crash (2s delay, 10 retries)
 - **In-game rumble**: Full haptic pipeline confirmed working — games calling `SDL_RumbleJoystick()` produce rumble on Neptune motors via PackedRumbleReport format
+- **Feature Reports in HID Report Map**: Feature Reports 0x00, 0x01, 0x85 declared in HID descriptor for Steam's SC2 HIDAPI driver
+- **CCCD timing fix**: Sends initial zero notifications when CCCDs are enabled to pre-fill UHID queue
+
+## Reverse Engineering Findings
+
+This project produced a detailed map of Steam's controller handling architecture through static binary analysis of `steamclient.so` (49MB, 141,343 functions) and the SC2 BLE firmware (`ibex_firmware.bin`, 2,027 functions).
+
+### Steam Client (steamclient.so) — Key Findings
+
+| Finding | Address | Description |
+|---------|---------|-------------|
+| Gate mechanism | `[esi+0x17c]` | 7 interactions: SET on error, CLEAR on normal, READ as bitmask, embedded in messages |
+| Gate CHECK | `0x0123e5fb` | `cmp byte [esi+0x17c], 0` — blocks command pipeline, NOT input |
+| Gate CLEAR | `0x0173ce00` | `RecvMsgAppStatus` — only function that clears gate |
+| Input path | `0x011e0930` | `PollControllers` — bypasses gate entirely, 6975 bytes |
+| Init chain stall | `0x01218840` | `CGetControllerInfoWorkItem::RunFunc` — retries 51×100ms, gets 0 bytes |
+| Graphics API | `[eax+0x160]` | Writer at `0x019aec80` — values 1=GL, 2=Vulkan, 3=D3D12 |
+| vtable[0x50] | 9 call sites | Fire-and-forget dispatch: SET_SETTINGS, gyro, mode switch |
+| Controller struct | 15+ offsets | 0xbc (transport), 0x160 (graphics), 0x17c (gate), 0x48c (PID) |
+| BLE/USB transport | `controller+0xbc` | 1=USB, 2=BLE. PID mapper at `0x011e9350` |
+
+### Firmware (ibex_firmware.bin) — Key Findings
+
+| Finding | Address | Description |
+|---------|---------|-------------|
+| Command dispatch | `0x000383c4` | TBH jump table, 144 entries at `0x383d2` |
+| Dispatch architecture | Pure lookup | Descriptor-based, not function-pointer. Caller builds message → event system |
+| 0xf2 ACK | `0x00042132` | 6-byte minimal response: `[01 00 00 00 00 f2]`, no payload |
+| Motor output | Command 0x80 | uint16 LE speed + int8 gain per motor, I2S peripheral |
+| Haptic sequencer | I2S driver | Script IDs + gain + master_gain_db, stereo waveform output |
+| Flash limitation | 33.4% | Binary is 350KB of 1MB flash. Descriptors at 0x59b10-0x5a332 beyond dump |
+
+### Full Decompilation
+
+- **steamclient.so**: 141,343 functions, 6.7M lines, 185 MB — `~/ghidra-projects/exports/32bit/full_decompiled_32bit.c`
+- **ibex_firmware.bin**: 2,027 functions, 73,645 lines — `spoofdeck-ghidra/ibex_firmware.bin_decompiled.c`
+- **proteus_firmware.bin**: 790 functions, 36,117 lines — `spoofdeck-ghidra/proteus_firmware.bin_decompiled.c`
 
 ## Project Structure
 
 ```
-├── AGENTS.md                    # Project continuation guide
-├── pii.env.example              # Configuration template (copy to pii.env)
+├── AGENTS.md                        # Project continuation guide (read first)
+├── README.md                        # This file
+├── pii.env.example                  # Configuration template (copy to pii.env)
 ├── docs/
-│   ├── sc2-protocol.md          # SC2 BLE protocol details
-│   ├── att-server-implementation.md  # ATT protocol details
-│   ├── findings-backlog.md      # Known issues and technical findings
-│   ├── hardware-findings.md     # Deck hardware findings
-│   └── challenges.md            # Known challenges and solutions
-├── research/                    # Technical research documents
+│   ├── sc2-protocol.md              # SC2 BLE protocol — PIDs, UUIDs, report formats
+│   ├── att-server-implementation.md # ATT opcode table, handle layout, host discovery
+│   ├── findings-backlog.md          # Known issues and technical findings
+│   ├── hardware-findings.md         # Deck hardware: USB, BT, HID descriptors
+│   ├── steam-client-analysis.md     # steamclient.so analysis, firmware files
+│   ├── challenges.md                # Known challenges and solutions
+│   └── investigation-plan.md        # Investigation methodology
+├── research/
+│   ├── raw-l2cap-viability.md       # Why raw L2CAP works
+│   ├── debug-bluetoothd-analysis.md # BlueZ GATT listener bug proof
+│   ├── att-mtu-failure-analysis.md  # ATT MTU root cause
+│   ├── smp-pairing-bypass-bluez.md  # SMP/ATT separation deep dive
+│   ├── implementation-roadmap.md    # Implementation plan
+│   ├── 32bit_ghidra_findings.md     # Controller behavior map (15+ offsets, 7 gate interactions)
+│   ├── ibex_command_table.md        # Firmware 95-command dispatch table
+│   ├── triton_vs_steamclient_crossref.md  # Firmware ↔ host cross-reference
+│   └── serial-format-analysis.md    # Serial validation analysis
 ├── src/
-│   ├── main_l2cap.py            # ENTRYPOINT — raw L2CAP ATT server
-│   ├── att_server.py            # Raw L2CAP ATT server (CID 4)
-│   ├── gatt_db.py               # GATT database (85 attributes, 6 services)
-│   ├── input_handler.py         # Neptune HID → SC2 input mapping
-│   ├── agent.py                 # BlueZ Agent1 (auto-confirm)
-│   ├── adv.py                   # BLE advertisement
-│   └── bluez.py                 # BlueZ D-Bus helpers
-└── scripts/
-    ├── setup.sh                 # Deck setup (first time only)
-    ├── deploy.sh                # Deploy source + restart service
-    └── diagnose.sh              # Full Deck status diagnostic
+│   ├── main_l2cap.py                # ENTRYPOINT — raw L2CAP ATT server
+│   ├── att_server.py                # Raw L2CAP ATT server (CID 4)
+│   ├── gatt_db.py                   # GATT database (87 attributes, 6 services)
+│   ├── input_handler.py             # Neptune HID → SC2 input mapping
+│   ├── agent.py                     # BlueZ Agent1 (auto-confirm)
+│   ├── adv.py                       # BLE advertisement
+│   └── bluez.py                     # BlueZ D-Bus helpers
+├── scripts/
+│   ├── setup.sh                     # Deck setup (first time only)
+│   ├── deploy.sh                    # Deploy source + restart service
+│   ├── diagnose.sh                  # Full Deck status diagnostic
+│   ├── config_bt.py                 # Configure BT adapter
+│   ├── extract_proto_trace.py       # Structured log parser
+│   ├── pair.py                      # Pexpect auto-pair (handles KDE dialog)
+│   └── connect_deck.py              # BLE connection (subprocess-based)
+├── firmware/
+│   ├── ibex_firmware.bin            # Triton SC2 BLE firmware (350KB, nRF52840)
+│   └── proteus_firmware.bin         # Puck Dongle firmware (194KB)
+├── ghidra-projects/                 # Ghidra analysis (local, not in git)
+│   ├── exports/32bit/
+│   │   ├── full_decompiled_32bit.c  # Full decompilation (6.7M lines, 185 MB)
+│   │   ├── functions.csv            # 141,351 functions
+│   │   ├── call_graph.csv           # 16,494 call edges
+│   │   └── strings.csv              # 56,317 strings
+│   └── scripts/
+│       ├── decompile_all.py         # Full decompilation script
+│       └── retry_timedout.py        # Retry 8 timed-out functions (300s timeout)
+└── deprecated/
+    ├── main.py                      # DEPRECATED — uses BlueZ GATT (broken)
+    └── gatt_app.py                  # DEPRECATED — D-Bus GATT objects
+```
+
+## Reading the Documentation
+
+The project has two layers: **what we built** (src/) and **what we learned** (docs/, research/). Here's how to navigate:
+
+### For Users
+
+Start with this README, then `docs/sc2-protocol.md` for the protocol basics. If you want to deploy, follow `scripts/setup.sh` and `scripts/deploy.sh`.
+
+### For Developers
+
+Read `AGENTS.md` first — it's the full project context including architecture, connection details, and how to run. Then:
+
+1. `src/main_l2cap.py` — the entrypoint, wires everything together
+2. `src/att_server.py` — the ATT protocol implementation
+3. `src/gatt_db.py` — the GATT database with all 87 attributes
+4. `src/input_handler.py` — the Neptune → SC2 report mapping
+
+### For Reverse Engineers
+
+The deepest technical content is in `research/`:
+
+| Document | What It Covers | Depth |
+|----------|---------------|-------|
+| `research/32bit_ghidra_findings.md` | Controller behavior map — struct offsets, gate mechanism, input/command path separation, firmware cross-references | **Start here** |
+| `research/ibex_command_table.md` | Firmware 95-command dispatch table with TBH jump table resolution, response formats, string references | Firmware protocol |
+| `research/triton_vs_steamclient_crossref.md` | How firmware and host binary map to each other | Cross-binary analysis |
+| `docs/att-server-implementation.md` | ATT opcode table, handle layout, host discovery sequence | ATT protocol |
+| `docs/findings-backlog.md` | All known issues ranked by severity, with evidence | Bug tracker |
+| `docs/steam-client-analysis.md` | steamclient.so analysis methodology and findings | Binary RE |
+| `docs/hardware-findings.md` | Deck hardware: USB interfaces, BT adapter, HID descriptors | Hardware |
+
+### The Full Picture
+
+For the complete reverse engineering story:
+
+1. **AGENTS.md** — the executive summary (read this first, always)
+2. **research/32bit_ghidra_findings.md** — the detailed findings
+3. **ghidra-projects/exports/32bit/full_decompiled_32bit.c** — the raw evidence (6.7M lines)
+4. **research/ibex_command_table.md** — firmware protocol details
+5. **spoofdeck-ghidra/ibex_firmware.bin_decompiled.c** — firmware decompilation (73K lines)
+
+The decompilation files are large but searchable. Use `grep` to find specific patterns:
+```bash
+# Find all 0x8F references
+grep -n "0x8f\|0x8F\|== 143" ~/ghidra-projects/exports/32bit/full_decompiled_32bit.c
+
+# Find all gate interactions
+grep -n "0x17c" ~/ghidra-projects/exports/32bit/full_decompiled_32bit.c
+
+# Find all vtable[0x50] calls
+grep -n "0x50\]" ~/ghidra-projects/exports/32bit/full_decompiled_32bit.c
 ```
 
 ## Known Issues
 
-- **Steam-generated haptics not working** — Trackpad clicks, UI feedback haptics do NOT produce rumble. These come from Steam's internal haptic system, not from `SDL_RumbleJoystick()`. Only games that call `SDL_RumbleJoystick()` produce rumble. See `docs/findings-backlog.md`.
+- **Steam-generated haptics not working** — Root cause: CCCD subscription timing gap. `CGetControllerInfoWorkItem::RunFunc` gets 0 bytes for 51 retries, stalls init chain, gate never set. Fix implemented (zero notifications on CCCD enable) but needs testing.
+- **Firmware binary truncated** — `ibex_firmware.bin` is 33.4% of nRF52840's 1MB flash. Command descriptors at 0x59b10-0x5a332 are beyond the dump. Full flash dump via J-Link/SWD needed.
 - **PnP ID warning** — BlueZ logs `Error reading PNP_ID: Protocol error` (non-fatal)
 - **KDE pairing dialog** — Host shows dialog during pairing, user must click "yes"
 - **Stale BlueZ state** — After code changes break a connection, clear bond data and restart BlueZ daemon. See `AGENTS.md` for the fix.
 
 ## Contributing
 
-**I don't own a real Steam Controller 2026.** This project was built through reverse engineering `steamclient.so` and Bluetooth protocol analysis. A real SC2 device would unlock:
+**No real Steam Controller 2026 was used in this project.** Everything was built through reverse engineering `steamclient.so` and Bluetooth protocol analysis. A real SC2 device would unlock:
 
-- **Haptics** — A btmon capture from a real SC2 would show exactly what haptic reports Steam sends, making translation straightforward
-- **Protocol refinements** — Verifying our synthetic command responses match a real device
-- **Edge cases** — Things only a real device would trigger
+- **BLE traffic capture** — btmon capture from a real SC2 would show exact ATT traffic, confirming our synthetic command responses
+- **Haptics** — Capturing what Steam sends for trackpad clicks and UI feedback
+- **Protocol refinements** — Verifying edge cases and timing behavior
+- **Firmware flash dump** — J-Link/SWD dump of the full nRF52840 flash would resolve the remaining firmware unknowns
 
-If you have a real SC2 and want to help, start with `docs/findings-backlog.md` for the full technical analysis. Key areas:
-- **Steam-generated haptics** — A btmon capture from a real SC2 would show what reports Steam sends for trackpad clicks and UI feedback, helping us understand why these don't reach Neptune motors
+If you have a real SC2 and want to help, start with `docs/findings-backlog.md` for the full technical analysis.
 
 ## Acknowledgments
 
@@ -134,3 +311,4 @@ If you have a real SC2 and want to help, start with `docs/findings-backlog.md` f
 - BlueZ source code (HOG profile, L2CAP reference)
 - SteamOS community research
 - InputPlumber project for Neptune protocol documentation and PackedRumbleReport format
+- Ghidra for binary analysis tooling

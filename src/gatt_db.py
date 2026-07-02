@@ -419,6 +419,36 @@ class GattDatabase:
             0x91, 0x02,        #   Output (Data,Var,Abs)
             0xC0,              # End Collection
 
+            # --- Feature Report 0x00 (SC2 Command Channel, 64 bytes) ---
+            0x06, 0x00, 0xFF,  # Usage Page (Vendor Defined 0xFF00)
+            0x09, 0x00,        # Usage (0x00)
+            0xA1, 0x02,        # Collection (Logical)
+            0x85, 0x00,        #   Report ID (0x00)
+            0x75, 0x08,        #   Report Size (8)
+            0x95, 0x40,        #   Report Count (64)
+            0xB1, 0x02,        #   Feature (Data,Var,Abs)
+            0xC0,              # End Collection
+
+            # --- Feature Report 0x01 (SC2 Capabilities, 64 bytes) ---
+            0x06, 0x00, 0xFF,  # Usage Page (Vendor Defined 0xFF00)
+            0x09, 0x01,        # Usage (0x01)
+            0xA1, 0x02,        # Collection (Logical)
+            0x85, 0x01,        #   Report ID (0x01)
+            0x75, 0x08,        #   Report Size (8)
+            0x95, 0x40,        #   Report Count (64)
+            0xB1, 0x02,        #   Feature (Data,Var,Abs)
+            0xC0,              # End Collection
+
+            # --- Feature Report 0x85 (SC2 Mode Switch, 64 bytes) ---
+            0x06, 0x00, 0xFF,  # Usage Page (Vendor Defined 0xFF00)
+            0x09, 0x85,        # Usage (0x85)
+            0xA1, 0x02,        # Collection (Logical)
+            0x85, 0x85,        #   Report ID (0x85)
+            0x75, 0x08,        #   Report Size (8)
+            0x95, 0x40,        #   Report Count (64)
+            0xB1, 0x02,        #   Feature (Data,Var,Abs)
+            0xC0,              # End Collection
+
         ])
 
 

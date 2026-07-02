@@ -93,7 +93,7 @@ Make a **Steam Deck** present itself as a **Steam Controller 2026 (SC2)** over *
 - **Lizard mode properly disabled** — NEPTUNE_LIZARD_OFF_CMDS uses direct 0x81 command (no Report ID prefix). EVIOCGRAB grabs event4/event5 at startup to prevent lizard mode evdev events from reaching KDE desktop.
 
 **Not Working:**
-- **Steam-generated haptics** — Trackpad clicks, UI feedback haptics, and other Steam-internal haptic events do NOT produce rumble. These come from Steam's own haptic system, not from `SDL_RumbleJoystick()`. The Steam haptic path uses a different code path that does not reach the Neptune motors. Only games that call `SDL_RumbleJoystick()` produce rumble. **Root cause (updated 2026-06-30)**: The entire command dispatch path involving the 0x8F dispatcher is never entered on BLE. GDB breakpoints on gate SET (`0x0178a140`), gate CHECK (`0x0123e5fa`), and 0x8F dispatcher (`0x00ec13a4`) hit ZERO times during a 30-second BLE connection. The gate at `[esi+0x17c]` is not the direct blocker — the code that would check it is never reached. The controller initialization chain (CHIDIOThread → CGetControllerInfoWorkItem → EYldWaitForControllerDetails) stalls before haptics are enabled. See `research/32bit_ghidra_findings.md` for the full controller behavior map.
+- **Steam-generated haptics** — Trackpad clicks, UI feedback haptics, and other Steam-internal haptic events do NOT produce rumble. These come from Steam's own haptic system, not from `SDL_RumbleJoystick()`. The Steam haptic path uses a different code path that does not reach the Neptune motors. Only games that call `SDL_RumbleJoystick()` produce rumble. **Root cause (updated 2026-07-01)**: The controller initialization chain (CHIDIOThread → CGetControllerInfoWorkItem → EYldWaitForControllerDetails) stalls because `CGetControllerInfoWorkItem::RunFunc` (0x01218840) calls wrapper vtable[5] (which internally calls `SDL_hid_read_timeout`) and gets 0 bytes. The read returns 0 because no ATT notifications reach `/dev/hidrawN` during the init window — the CCCD subscription registration has a timing gap where notifications are dropped before the subscription is registered. The gate at `[esi+0x17c]` is never reached because the init chain stalls first. **Note**: The gate does NOT block input — inputs flow through the separate `PollControllers` path (0x011e0930) which bypasses the gate entirely. The gate only blocks the command/haptic pipeline. See `research/32bit_ghidra_findings.md` for the full controller behavior map.
 
 **~~❌ Not Working (Both PRE-EXISTING)~~ — RESOLVED (2026-06-26):**
 - **~~Zombie disconnect~~** — Caused by stale BlueZ state, not code. After host PC reboot or clearing bond data + restarting BlueZ daemon, registration completes and input flows.
@@ -124,10 +124,15 @@ Ghidra analysis of both firmware files. Full decompiled C exports in `spoofdeck-
 **Key findings**:
 - **100 total commands** in firmware command dispatch (we handle 9)
 - **0x8F gate** is entirely in steamclient.so — firmware handles 0x8F correctly
-- **Puck is transparent relay** — report IDs identical between ESB, USB, BLE ATT
+- **Puck is transparent relay** — ESB→USB relay, report IDs identical to BLE ATT (Puck uses ESB, not BLE)
 - **Triton supports BLE + ESB simultaneously**
 - **GATT**: Only HID Service (0x1812) explicitly registered; Battery/Device Info NOT in firmware
 - **Button bitmask**: Neptune HID path matches SDL3 exactly
+- **Firmware binary is 33.4% of flash** — `ibex_firmware.bin` is 350KB of the nRF52840's 1MB flash. Command descriptors at 0x59b10–0x5a332 (19KB beyond the dump) are unreadable. Full flash dump via J-Link/SWD needed.
+- **TBH jump table resolved** — dispatch at `0x000383c4` uses Thumb halfword branch table at `0x383d2` (144 entries). Each entry is a 2-byte offset. Unhandled commands (0x25-0x2c, 0x2f-0x3b, etc.) all point to default handler at `0x03866a`.
+- **Dispatch is a pure lookup** — caller builds a message structure with the descriptor and submits to firmware event system via `fcn.0003aab4 → fcn.0001b07c`.
+- **0xf2 is a minimal ACK** — NOT a capability response. Response is `[0x01, 0x00, 0x00, 0x00, 0x00, 0xf2]` (6 bytes, no payload). Sent after 0xe7 (mapping) commands. The "capability query" interpretation from steamclient.so may be a different protocol path (HID Feature Reports over ESB/USB).
+- **0x80 is the motor output command** — NOT 0x8F. 0x8F is just one of many individually-wrapped commands. Motor drive: uint16 LE speed + int8 gain per motor, driven via nRF52840 I2S peripheral. Left/right motors independent.
 
 **Ghidra projects**: `spoofdeck-ghidra` repo (IBEX_Triton.gpr, PROTEUS_Puck.gpr)
 **Firmware extracts**: `firmware/ibex_firmware.bin`, `firmware/proteus_firmware.bin`
@@ -137,7 +142,7 @@ Ghidra analysis of both firmware files. Full decompiled C exports in `spoofdeck-
 
 1. ~~**⚠️ CRITICAL: ALL PRIOR BINARY ANALYSIS WAS ON THE WRONG BINARY**~~ — **RESOLVED (2026-06-30)**. All RE analysis files updated to use 32-bit (`ubuntu12_32/steamclient.so`) addresses. 56 files changed, 1424 insertions, 1345 deletions. 52 string addresses verified, 26 function addresses marked `[NEEDS RE-ANALYSIS]`.
 2. **GDB on host Steam process (RECOMMENDED NEXT STEP)** — Breakpoint on `CGetControllerInfoWorkItem::RunFunc` (0x01218840) to see what `SDL_hid_read_timeout` returns. This will confirm whether the HID read gets 0 bytes (timing issue) or wrong data (format issue). Alternative: capture Steam's controller.txt logs and btmon ATT traffic during BLE connection.
-3. **LD_PRELOAD patch for 0x8F gate (AFTER INITIALIZATION FIX)** — The gate CHECK at `0x0123e5fa` can be patched, but only after the initialization chain is fixed to actually reach that code path. 55-65% probability of working once the chain is unblocked.
+3. **LD_PRELOAD patch for 0x8F gate (AFTER INITIALIZATION FIX)** — The gate CHECK at `0x0123e5fb` can be patched, but only after the initialization chain is fixed to actually reach that code path. 55-65% probability of working once the chain is unblocked.
 4. **ATT Server Spec Compliance** — Implement one at a time, test each:
    - Read Blob error code (0x01 → 0x07)
    - MTU caps on Read/Notify PDUs
@@ -154,19 +159,26 @@ Ghidra analysis of both firmware files. Full decompiled C exports in `spoofdeck-
 | 32-bit Offset | Function/Label | Status |
 |---------|---------------|--------|
 | `0x0178a140` | Gate SET (`mov byte [esi+0x17c], 1`) | **VERIFIED** |
+| `0x0173ce00` | Gate CLEAR (`mov byte [param_2+0x17c], 0`) — `RecvMsgAppStatus` | **VERIFIED** |
 | `0x0123e5fb` | Gate CHECK (`cmp byte [esi+0x17c], 0`) | **VERIFIED** |
 | `0x00bfc7e3` | YieldingRunTestProgram string | **VERIFIED** |
 | `0x01218840` | CGetControllerInfoWorkItem::RunFunc | **VERIFIED** (Ghidra) |
-| `0x015675a8` | Controller message dispatcher | **NEEDS GDB** |
-| `0x015677f4` | YRT allocation | **NEEDS GDB** |
-| `0x01559070` | Graphics API type writer | **NEEDS GDB** |
+| `0x019aec80` | Graphics API type writer (writes to `[eax+0x160]`) | **VERIFIED** |
+| `0x01789ea0` | Graphics API type dispatcher (reads `[eax+0x160]`) | **VERIFIED** |
+| `0x012191a0` | Per-controller slot initializer (0xDC bytes each, 16 slots) | **VERIFIED** |
+| `0x011d8c40` | CHIDIOThread constructor (0xBB78 bytes) | **VERIFIED** |
+| `0x011e9be0` | Master controller constructor (0xC34 bytes) | **VERIFIED** |
+| `0x011e9350` | PID-to-transport mapper (0x1303→BLE, 0x1302→USB) | **VERIFIED** |
+| `0x0122ba20` | Main controller init (sets `controller+0xbc` = transport type) | **VERIFIED** |
+| `0x01217a30` | SET_SETTINGS dispatch (fire-and-forget, no response read) | **VERIFIED** |
 
 ### Ghidra Analysis Results
 
 Ghidra 11.3.1 at `~/ghidra`. Key findings:
 - `CGetControllerInfoWorkItem::RunFunc` (0x01218840) calls `SDL_hid_read_timeout` via vtable[5] and gets **0 bytes**. Retries 51 × 100ms = 5.1s, then fails. Init chain stalls before haptics enabled.
 - Init chain: `CHIDIOThread_Main` → `CWorkItemThread` → `CGetControllerInfoWorkItem` (STALLS) → `EYldWaitForControllerDetails` → gate SET (never reached)
-- Exports in `spoofdeck-ghidra` repo (`steamclient_exports/`): functions.csv (141K), strings.csv (56K), controller_decompiled_32bit.txt, call_graph.csv
+- **Full decompilation completed (2026-07-01)**: 141,343 / 141,351 functions (99.994%), 6.7M lines, 185 MB. Output: `~/ghidra-projects/exports/32bit/full_decompiled_32bit.c`. 8 functions timed out (all >64KB).
+- Exports in `~/ghidra-projects/exports/32bit/`: functions.csv (141K), strings.csv (56K), call_graph.csv, full_decompiled_32bit.c, controller_decompiled_32bit.txt
 
 ### Files You Must Read Before Making Changes
 
@@ -394,7 +406,7 @@ Steps:
 2. [What to look for]
 3. [What to save]
 
-Save to: research/steamclient-reverse-session/functions/[name].c
+Save findings to research/32bit_ghidra_findings.md or reference full_decompiled_32bit.c with line numbers
 
 ## Tools
 
@@ -479,7 +491,7 @@ The zombie check at 0x011f7630 calls vtable[0x18] to get connection state.
 ## What You Must Find
 ### 1. What Does the Connection State Query Return? (HIGH)
 Steps: Disassemble 0x011f7630, trace vtable[0x18], find return value.
-Save to: research/steamclient-reverse-session/functions/zombie_connection_state.c
+Save to: research/32bit_ghidra_findings.md (or reference full_decompiled_32bit.c)
 ```
 
 ### Principle 11: Parallelism Without Stepping on Toes
@@ -760,7 +772,7 @@ Sticks, triggers, trackpads, IMU — see `docs/sc2-protocol.md` for full format.
 │   ├── implementation-roadmap.md     # Implementation plan (completed)
 │   ├── 32bit_ghidra_findings.md      # Ghidra analysis results
 │   ├── serial-format-analysis.md     # Serial validation analysis
-│   ├── steamclient-reverse-session/  # RE session data + functions/
+│   ├── steamclient-reverse-session/  # RE session findings.md
 │   └── steamclient-reverse/          # Raw RE strings + reports
 ├── dbus-config/
 │   └── com.steamdeck.hogp.conf  # D-Bus system policy
@@ -788,6 +800,15 @@ Sticks, triggers, trackpads, IMU — see `docs/sc2-protocol.md` for full format.
 │   ├── bt_remove.py             # Remove BT device
 │   ├── gdb_0x1d8_test.sh        # GDB test script (32-bit)
 │   └── capture_haptics.py       # Haptic capture script
+├── ghidra-projects/             # Ghidra analysis (local, not in git)
+│   ├── exports/32bit/
+│   │   ├── full_decompiled_32bit.c  # Full decompilation (6.7M lines, 185MB)
+│   │   ├── functions.csv        # 141,351 functions
+│   │   ├── call_graph.csv       # 16,494 call edges
+│   │   └── strings.csv          # 56,317 strings
+│   └── scripts/
+│       ├── decompile_all.py     # Full decompilation script
+│       └── retry_timedout.py    # Retry 8 timed-out functions (300s timeout)
 ├── patches/
 │   └── check_static_addr.patch
 └── scratch/                     # Temporary captures (gitignored)
