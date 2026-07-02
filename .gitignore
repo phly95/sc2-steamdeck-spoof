@@ -16,3 +16,4 @@ firmware/*_strings.json
 firmware/*_string_xrefs.json
 *.gpr
 *.rep/
+hardwareupdater.x86_64_extracted/
